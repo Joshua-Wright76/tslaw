@@ -332,6 +332,7 @@ export async function verifyFiles(
     // postcondition's own proof. Withdraw verdicts whose foundations did not hold, after
     // trying once more without the assumed postconditions.
     const triedPlain = new Set<number>();
+    const withdrawn = new Set<number>();
     for (let changed = true; changed; ) {
       changed = false;
       for (let idx = 0; idx < loweredLaws.length; idx++) {
@@ -340,12 +341,12 @@ export async function verifyFiles(
         const failed =
           res.status === "proved"
             ? dependsOn[idx]!.find((d) => lawResults[d]!.status !== "proved")
-            : res.status === "disproved" || res.status === "error"
+            : res.status === "disproved" || res.status === "error" || !withdrawn.has(idx)
               ? // A counterexample still stands if an assumed postcondition fails (assuming
                 // less cannot remove it), but not if a definition it uses is unfounded (the
-                // solvers may then even disagree, since the query is contradictory) or if a
-                // precondition or invariant on the way can fail (the model is unspecified
-                // there).
+                // solvers may then even disagree, since the query is contradictory, or time
+                // out unfolding a non-terminating function) or if a precondition or invariant
+                // on the way can fail (the model is unspecified there).
                 lowered.foundations.find((d) => lawResults[d]!.status !== "proved")
               : undefined;
         if (failed === undefined) continue;
@@ -364,6 +365,7 @@ export async function verifyFiles(
             continue;
           }
         }
+        withdrawn.add(idx);
         const { crossCheck: _c, counterexample: _x, ...rest } = res;
         lawResults[idx] = {
           ...rest,
