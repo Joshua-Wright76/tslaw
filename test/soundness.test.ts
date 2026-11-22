@@ -123,7 +123,7 @@ describe("soundness: fixtures that once produced false PROVED verdicts", () => {
     expect(laws.length).toBeGreaterThan(0);
   });
 
-  it("rejects `implies` imported from a module that is not the lawscript runtime", async () => {
+  it("rejects `implies` imported from a module that is not the tslaw runtime", async () => {
     const report = await verifyFiles([path.join(FIXTURE_DIR, "fake-implies-unverified.law.ts")]);
     expect(report.ok).toBe(false);
     expect(report.summary.proved).toBe(0);

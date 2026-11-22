@@ -149,7 +149,7 @@ export async function runZ3(
         durationMs: Math.round(performance.now() - start),
         reason:
           `Could not run Z3 (\`${options.z3Path}\`): ${err.message}. ` +
-          "Install it (`brew install z3`, `apt-get install z3`) or point to it with --z3 / LAWSCRIPT_Z3.",
+          "Install it (`brew install z3`, `apt-get install z3`) or point to it with --z3 / TSLAW_Z3.",
       });
     });
 

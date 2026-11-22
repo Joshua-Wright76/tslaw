@@ -37,7 +37,7 @@ export interface DialectAnalysis {
 // ---------------------------------------------------------------------------
 // Runtime identification
 //
-// `law` and `implies` get special SMT semantics, so they must be the *real* lawscript runtime
+// `law` and `implies` get special SMT semantics, so they must be the *real* tslaw runtime
 // helpers — not any function that happens to share the name. A user-defined
 // `implies = (a, b) => a && b` lowered as SMT `=>` would let false laws be PROVED.
 // ---------------------------------------------------------------------------
@@ -73,11 +73,11 @@ const BUNDLED_RUNTIME_FILES = new Set(
 const runtimeFileCache = new Map<string, boolean>();
 
 /**
- * True if `fileName` is the lawscript runtime module: either this installation's own copy, or
+ * True if `fileName` is the tslaw runtime module: either this installation's own copy, or
  * the runtime of an installed package with the same name (e.g. a project-local install checked
  * by a globally installed CLI).
  */
-export function isLawscriptRuntimeFile(fileName: string): boolean {
+export function isTslawRuntimeFile(fileName: string): boolean {
   const cached = runtimeFileCache.get(fileName);
   if (cached !== undefined) return cached;
 
@@ -127,7 +127,7 @@ export function resolveCallee(checker: ts.TypeChecker, ident: ts.Identifier): Ca
   const name = decl.name.text;
   if (
     (name === "law" || name === "implies") &&
-    isLawscriptRuntimeFile(decl.getSourceFile().fileName)
+    isTslawRuntimeFile(decl.getSourceFile().fileName)
   ) {
     return { kind: "runtime", helper: name };
   }
@@ -173,7 +173,7 @@ export function vTypesEqual(a: VType, b: VType): boolean {
 }
 
 /**
- * Convert a resolved TypeScript type into a supported lawscript VType.
+ * Convert a resolved TypeScript type into a supported tslaw VType.
  *
  * With `declared` set (parameter types), literal types such as `5n` or `true` are rejected:
  * they are modeled as plain `Int`/`Bool`, so a law quantifying over such a parameter would
@@ -234,7 +234,7 @@ export function resolveVType(
     }
     return {
       ok: false,
-      reason: `union type \`${checker.typeToString(type)}\` is not supported in lawscript v0.1`,
+      reason: `union type \`${checker.typeToString(type)}\` is not supported in tslaw v0.1`,
     };
   }
 
@@ -245,7 +245,7 @@ export function resolveVType(
     if (checker.isArrayType(type) || checker.isTupleType(type)) {
       return {
         ok: false,
-        reason: `array/tuple type \`${checker.typeToString(type)}\` is not supported in lawscript v0.1`,
+        reason: `array/tuple type \`${checker.typeToString(type)}\` is not supported in tslaw v0.1`,
       };
     }
     if (type.getCallSignatures().length > 0) {
@@ -303,7 +303,7 @@ export function resolveVType(
 }
 
 /**
- * Analyze a TypeScript source file against the lawscript sound pure subset.
+ * Analyze a TypeScript source file against the tslaw sound pure subset.
  */
 export function analyzeDialect(
   sf: ts.SourceFile,
@@ -393,7 +393,7 @@ export function analyzeDialect(
         if ((orig === "law" || orig === "implies") && !hasUseVerifiedDirective(depSf)) {
           addError(
             "LAW001",
-            `\`${orig}\` must be imported from the lawscript runtime (found a different \`${orig}\` in ${depSf.fileName})`,
+            `\`${orig}\` must be imported from the tslaw runtime (found a different \`${orig}\` in ${depSf.fileName})`,
             elem,
           );
           continue;
@@ -507,7 +507,7 @@ export function analyzeDialect(
         if (op === ts.SyntaxKind.SlashToken || op === ts.SyntaxKind.PercentToken) {
           addError(
             "LAW013",
-            "Division `/` and modulo `%` are not yet supported in lawscript v0.1 (JS truncating semantics differ from SMT Euclidean div)",
+            "Division `/` and modulo `%` are not yet supported in tslaw v0.1 (JS truncating semantics differ from SMT Euclidean div)",
             expr.operatorToken,
           );
           return;
@@ -817,7 +817,7 @@ export function analyzeDialect(
         continue;
       }
       if (stmt.typeParameters && stmt.typeParameters.length > 0) {
-        addError("LAW003", "Generic type parameters are not supported in lawscript v0.1", stmt);
+        addError("LAW003", "Generic type parameters are not supported in tslaw v0.1", stmt);
         continue;
       }
       if (!stmt.body) {
@@ -912,7 +912,7 @@ export function analyzeDialect(
         diagnostics.push({
           stage: "dialect",
           code: "LAW032",
-          message: `Recursion is not supported in lawscript v0.1 (cycle: ${cycle})`,
+          message: `Recursion is not supported in tslaw v0.1 (cycle: ${cycle})`,
           location: fn.location,
         });
       } else if (c === 0) {

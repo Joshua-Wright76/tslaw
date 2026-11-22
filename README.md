@@ -1,13 +1,13 @@
-# lawscript
+# tslaw
 
-**Verified TypeScript.** Write `law(...)`s about your pure TypeScript functions, and lawscript asks the [Z3](https://github.com/Z3Prover/z3) theorem prover whether they hold for *every possible input*. If a law is false, you get a concrete counterexample.
+**Verified TypeScript.** Write `law(...)`s about your pure TypeScript functions, and tslaw asks the [Z3](https://github.com/Z3Prover/z3) theorem prover whether they hold for *every possible input*. If a law is false, you get a concrete counterexample.
 
 Verified modules opt in with a `"use verified";` directive and stay ordinary TypeScript: there is no compiler fork, and the rest of your code imports them as usual.
 
 ```ts
 "use verified";
 
-import { law, implies } from "lawscript/runtime";
+import { law, implies } from "tslaw/runtime";
 
 export type Account = { readonly balance: bigint; readonly frozen: boolean };
 
@@ -23,7 +23,7 @@ law("withdraw never overdrafts", (acc: Account, amount: bigint) => {
 ```
 
 ```
-$ lawscript check bank.law.ts
+$ tslaw check bank.law.ts
 bank.law.ts
   PROVED    "withdraw never overdrafts" (41ms)
 ```
@@ -40,23 +40,23 @@ Forget a check, and the law is refuted with inputs you can paste into a test:
 ## Install
 
 ```sh
-npm install --save-dev lawscript
+npm install --save-dev tslaw
 ```
 
 Requirements:
 
 - Node.js 20 or newer.
-- The `z3` binary on your `PATH` (`brew install z3`, `apt-get install z3`, or a [release build](https://github.com/Z3Prover/z3/releases)). To use a binary elsewhere, pass `--z3 /path/to/z3` or set `LAWSCRIPT_Z3`.
+- The `z3` binary on your `PATH` (`brew install z3`, `apt-get install z3`, or a [release build](https://github.com/Z3Prover/z3/releases)). To use a binary elsewhere, pass `--z3 /path/to/z3` or set `TSLAW_Z3`.
 
 ## Usage
 
 ```
-lawscript check <file1.ts> [file2.ts ...] [options]
+tslaw check <file1.ts> [file2.ts ...] [options]
 
   --emit-smt         Print the generated SMT-LIB2 for each law
   --json             Output a machine-readable JSON report
   --timeout <ms>     Per-law Z3 timeout in ms (default: 5000)
-  --z3 <path>        Path to the z3 binary (default: LAWSCRIPT_Z3 or 'z3')
+  --z3 <path>        Path to the z3 binary (default: TSLAW_Z3 or 'z3')
   --all              Check files even without a "use verified"; directive
 ```
 
@@ -71,7 +71,7 @@ Each law gets one of these verdicts:
 | `UNKNOWN` | Z3 gave up or timed out. Nothing is known either way. |
 | `ERROR` | Z3 could not run, or rejected the generated query. |
 
-There is also a programmatic API: `import { verifyFiles } from "lawscript"`.
+There is also a programmatic API: `import { verifyFiles } from "tslaw"`.
 
 ## How it works
 
@@ -98,7 +98,7 @@ Each file goes through three stages. A failure at any stage stops that file.
 - `const` bindings (including object destructuring), `if`/`else` where every path returns, ternaries.
 - Operators: `+ - *`, comparisons, `===`/`!==` on `bigint` and `boolean`, `&& || !`.
 - Calls to other verified functions, and `implies(p, q)`.
-- Imports: `law`/`implies` from `lawscript/runtime`, types from anywhere, and functions from other `"use verified";` modules.
+- Imports: `law`/`implies` from `tslaw/runtime`, types from anywhere, and functions from other `"use verified";` modules.
 
 **Not allowed**
 
@@ -112,24 +112,24 @@ Each file goes through three stages. A failure at any stage stops that file.
 
 `PROVED` is a statement about a mathematical model of your code. It is worth exactly as much as the following assumptions:
 
-- **Only the laws are proved.** lawscript does not check that your laws say what you meant, or that they cover the behavior you care about.
+- **Only the laws are proved.** tslaw does not check that your laws say what you meant, or that they cover the behavior you care about.
 - **`law` does nothing at runtime.** It is a no-op, so laws cost nothing in production and are never executed there.
 - **Callers outside verified modules are not checked.** A law is proved for all *well-typed* inputs. Unverified code can still call a verified function with values that break its types (through `any`, casts, or plain JavaScript), and nothing stops it at runtime.
 - **Preconditions are yours to enforce.** A law of the form `implies(x >= 0n, ...)` says nothing about negative `x`.
-- **The verifier is trusted.** A proof depends on lawscript's translation to SMT, the TypeScript compiler, and Z3 all being correct. lawscript itself is young.
+- **The verifier is trusted.** A proof depends on tslaw's translation to SMT, the TypeScript compiler, and Z3 all being correct. tslaw itself is young.
 
-To keep that last point honest, the test suite cross-checks verdicts against real execution: every proved law is run on random inputs, every counterexample is replayed, and `test/fixtures/soundness/` holds a regression case for each known way lawscript was once tricked into proving something false.
+To keep that last point honest, the test suite cross-checks verdicts against real execution: every proved law is run on random inputs, every counterexample is replayed, and `test/fixtures/soundness/` holds a regression case for each known way tslaw was once tricked into proving something false.
 
-**If lawscript proves a law that fails when you run it, that is the most serious kind of bug. Please [open an issue](https://github.com/Joshua-Wright76/lawscript/issues) with the smallest file that reproduces it.**
+**If tslaw proves a law that fails when you run it, that is the most serious kind of bug. Please [open an issue](https://github.com/Joshua-Wright76/tslaw/issues) with the smallest file that reproduces it.**
 
 ## Error codes
 
-Codes starting with `TS` come from the TypeScript compiler. The rest are lawscript's.
+Codes starting with `TS` come from the TypeScript compiler. The rest are tslaw's.
 
 | Code | Meaning |
 |---|---|
 | `LAW000` | File not found or unreadable. |
-| `LAW001` | Disallowed import: default or namespace import, a value from an unverified module, or `law`/`implies` not from the lawscript runtime. |
+| `LAW001` | Disallowed import: default or namespace import, a value from an unverified module, or `law`/`implies` not from the tslaw runtime. |
 | `LAW002` | Anonymous top-level function. |
 | `LAW003` | `async`, generator, generic, or body-less function. |
 | `LAW004` | Function return type is missing or not a supported type. |
@@ -165,8 +165,8 @@ Codes starting with `TS` come from the TypeScript compiler. The rest are lawscri
 ## Development
 
 ```sh
-git clone https://github.com/Joshua-Wright76/lawscript.git
-cd lawscript
+git clone https://github.com/Joshua-Wright76/tslaw.git
+cd tslaw
 npm install
 npm run build
 npm test          # needs z3 on PATH; takes about 30 seconds
@@ -177,7 +177,7 @@ node dist/cli.js check examples/unsound.law.ts                       # dialect e
 node dist/cli.js check examples/tokens.law.ts --emit-smt             # see the SMT-LIB2
 ```
 
-Files in `examples/` import the runtime by relative path (`../src/runtime.js`) so they work inside this repository; in your own project, import `lawscript/runtime`.
+Files in `examples/` import the runtime by relative path (`../src/runtime.js`) so they work inside this repository; in your own project, import `tslaw/runtime`.
 
 Layout: `src/dialect.ts` (subset checker), `src/smt.ts` (translation to SMT-LIB2), `src/z3.ts` (solver runner), `src/verify.ts` (pipeline), `src/cli.ts`.
 

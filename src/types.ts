@@ -53,7 +53,7 @@ export interface VerifyOptions {
   readonly emitSmt?: boolean;
   /** Per-law Z3 timeout in milliseconds (default: 5000). */
   readonly timeoutMs?: number;
-  /** Explicit path to the z3 binary (default: LAWSCRIPT_Z3 env or "z3"). */
+  /** Explicit path to the z3 binary (default: TSLAW_Z3 env or "z3"). */
   readonly z3Path?: string;
   /** Verify files even without a top-level "use verified" directive. */
   readonly requireDirective?: boolean;

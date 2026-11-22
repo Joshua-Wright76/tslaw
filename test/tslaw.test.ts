@@ -8,7 +8,7 @@ import { buggyTransfer } from "../examples/buggy.law.js";
 const tmpDirs: string[] = [];
 
 function writeTempLawFile(filename: string, body: string): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lawscript-test-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tslaw-test-"));
   tmpDirs.push(dir);
   const runtimePath = path.resolve("src/runtime.ts").replace(/\.ts$/, ".js");
   const content = body.replaceAll("RUNTIME_PATH", runtimePath);
@@ -24,7 +24,7 @@ afterEach(() => {
   }
 });
 
-describe("lawscript formal verifier", () => {
+describe("tslaw formal verifier", () => {
   it("proves all laws in examples/tokens.law.ts and examples/bank.law.ts", async () => {
     const report = await verifyFiles([
       "examples/tokens.law.ts",
@@ -192,7 +192,7 @@ law("swap preserves order (false!)", (p: Pair) => {
   });
 
   it("supports importing pure functions from another 'use verified' module", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lawscript-xfile-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tslaw-xfile-"));
     tmpDirs.push(dir);
     const runtimePath = path.resolve("src/runtime.ts").replace(/\.ts$/, ".js");
     fs.writeFileSync(

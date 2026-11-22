@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>How lawscript works</title>
+<title>How tslaw works</title>
 <style>
   :root { color-scheme: light dark; }
   body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
@@ -133,14 +133,14 @@
 </style>
 </head>
 <body>
-<div class="player" id="player" tabindex="0" aria-label="How lawscript works, animated explainer">
+<div class="player" id="player" tabindex="0" aria-label="How tslaw works, animated explainer">
   <div class="stage" id="stage">
     <div class="canvas" id="canvas">
 
       <!-- 1 -->
       <section class="scene" data-dur="7" data-title="Intro">
         <div class="center">
-          <div class="logo" data-at="0"><b>law</b>script</div>
+          <div class="logo" data-at="0">ts<b>law</b></div>
           <div class="sub" data-at="0">Proofs for TypeScript functions, checked by Z3</div>
           <div class="pill" data-at="0">How it works, in about two minutes</div>
         </div>
@@ -158,7 +158,7 @@
         <div class="caption">
           <span data-at="0.3" data-until="5.6">Each dot is a possible input. Your tests try a handful.</span>
           <span data-at="5.6" data-until="11">A law is a claim about <em>every</em> input, including the ones you forgot.</span>
-          <span data-at="11">lawscript checks laws with a theorem prover, so nothing is left out.</span>
+          <span data-at="11">tslaw checks laws with a theorem prover, so nothing is left out.</span>
         </div>
       </section>
 
@@ -167,7 +167,7 @@
         <div class="kicker">What you write</div>
         <h2>Ordinary TypeScript, plus laws</h2>
         <div class="code" style="margin-top:16px;line-height:1.45">
-<span class="ln" data-lit="1.5,5"><span class="s">"use verified"</span>;</span><span class="ln"><span class="k">import</span> { law, implies } <span class="k">from</span> <span class="s">"lawscript/runtime"</span>;</span><span class="ln"> </span><span class="ln" data-lit="5,10"><span class="k">type</span> <span class="t">Result</span> = { <span class="k">readonly</span> from: <span class="t">bigint</span>; <span class="k">readonly</span> to: <span class="t">bigint</span> };</span><span class="ln" data-lit="5,10"><span class="k">export function</span> <span class="f">transfer</span>(from: <span class="t">bigint</span>, to: <span class="t">bigint</span>, amount: <span class="t">bigint</span>): <span class="t">Result</span> {</span><span class="ln" data-lit="5,10">  <span class="k">if</span> (amount &gt; from) <span class="k">return</span> { from, to };</span><span class="ln" data-lit="5,10">  <span class="k">return</span> { from: from - amount, to: to + amount };</span><span class="ln" data-lit="5,10">}</span><span class="ln"> </span><span class="ln" data-lit="10,17"><span class="f">law</span>(<span class="s">"balances never go negative"</span>, (from: <span class="t">bigint</span>, to: <span class="t">bigint</span>, amount: <span class="t">bigint</span>) =&gt; {</span><span class="ln" data-lit="10,17">  <span class="k">const</span> next = <span class="f">transfer</span>(from, to, amount);</span><span class="ln" data-lit="10,17">  <span class="k">return</span> <span class="f">implies</span>(from &gt;= <span class="n">0n</span> &amp;&amp; to &gt;= <span class="n">0n</span>, next.from &gt;= <span class="n">0n</span> &amp;&amp; next.to &gt;= <span class="n">0n</span>);</span><span class="ln" data-lit="10,17">});</span></div>
+<span class="ln" data-lit="1.5,5"><span class="s">"use verified"</span>;</span><span class="ln"><span class="k">import</span> { law, implies } <span class="k">from</span> <span class="s">"tslaw/runtime"</span>;</span><span class="ln"> </span><span class="ln" data-lit="5,10"><span class="k">type</span> <span class="t">Result</span> = { <span class="k">readonly</span> from: <span class="t">bigint</span>; <span class="k">readonly</span> to: <span class="t">bigint</span> };</span><span class="ln" data-lit="5,10"><span class="k">export function</span> <span class="f">transfer</span>(from: <span class="t">bigint</span>, to: <span class="t">bigint</span>, amount: <span class="t">bigint</span>): <span class="t">Result</span> {</span><span class="ln" data-lit="5,10">  <span class="k">if</span> (amount &gt; from) <span class="k">return</span> { from, to };</span><span class="ln" data-lit="5,10">  <span class="k">return</span> { from: from - amount, to: to + amount };</span><span class="ln" data-lit="5,10">}</span><span class="ln"> </span><span class="ln" data-lit="10,17"><span class="f">law</span>(<span class="s">"balances never go negative"</span>, (from: <span class="t">bigint</span>, to: <span class="t">bigint</span>, amount: <span class="t">bigint</span>) =&gt; {</span><span class="ln" data-lit="10,17">  <span class="k">const</span> next = <span class="f">transfer</span>(from, to, amount);</span><span class="ln" data-lit="10,17">  <span class="k">return</span> <span class="f">implies</span>(from &gt;= <span class="n">0n</span> &amp;&amp; to &gt;= <span class="n">0n</span>, next.from &gt;= <span class="n">0n</span> &amp;&amp; next.to &gt;= <span class="n">0n</span>);</span><span class="ln" data-lit="10,17">});</span></div>
         <div class="caption">
           <span data-at="0.2" data-until="5">One line opts the file in. Everything else in your project is untouched.</span>
           <span data-at="5" data-until="10">Your functions are plain TypeScript. This one moves tokens between two balances.</span>
@@ -177,7 +177,7 @@
 
       <!-- 4 -->
       <section class="scene" data-dur="13" data-title="The pipeline">
-        <div class="kicker">lawscript check</div>
+        <div class="kicker">tslaw check</div>
         <h2>Each file goes through three stages</h2>
         <div class="pipe">
           <div class="step" data-lit="1.5,4.5"><div class="num">STAGE 1</div><h3>Type check</h3><p>TypeScript's own compiler, on its strictest settings.</p></div>
@@ -296,7 +296,7 @@
       <section class="scene" data-dur="18" data-title="A counterexample">
         <div class="kicker">In practice</div>
         <h2>The transfer function has a bug</h2>
-        <div class="term"><span data-at="0.8"><span class="c">$</span> lawscript check transfer.law.ts</span><span data-at="2.2">  <span class="bad">DISPROVED</span> "balances never go negative"</span><span data-at="3.2">            Counterexample: from = <span class="n">0n</span>, to = <span class="n">8855n</span>, amount = <span class="n">-8856n</span></span></div>
+        <div class="term"><span data-at="0.8"><span class="c">$</span> tslaw check transfer.law.ts</span><span data-at="2.2">  <span class="bad">DISPROVED</span> "balances never go negative"</span><span data-at="3.2">            Counterexample: from = <span class="n">0n</span>, to = <span class="n">8855n</span>, amount = <span class="n">-8856n</span></span></div>
         <div class="eval">
           <div class="code" data-at="6"><span class="f">transfer</span>(<span class="n">0n</span>, <span class="n">8855n</span>, <span class="n">-8856n</span>)</div>
           <div class="arrow" data-at="7.5">→</div>
@@ -317,7 +317,7 @@
         <div class="three">
           <div class="card" data-at="1.5"><b class="acc">Random runs</b>Every proved law is also run in real JavaScript on hundreds of random inputs.</div>
           <div class="card" data-at="4"><b class="acc">Replayed failures</b>Every counterexample is run for real and must actually break the law.</div>
-          <div class="card" data-at="6.5"><b class="acc">A file per past bug</b>Each way lawscript was once fooled is kept as a test that must never pass again.</div>
+          <div class="card" data-at="6.5"><b class="acc">A file per past bug</b>Each way tslaw was once fooled is kept as a test that must never pass again.</div>
         </div>
         <div class="limits">
           <div data-at="10.5"><b>It proves your laws,</b> not that you wrote the right laws.</div>
@@ -334,7 +334,7 @@
       <section class="scene" data-dur="9" data-title="Try it">
         <div class="center">
           <h2 data-at="0.2">Try it</h2>
-          <div class="term" data-at="0.8" style="text-align:left;font-size:24px;min-width:640px"><span><span class="c">$</span> npm install --save-dev lawscript</span><span><span class="c">$</span> brew install z3</span><span><span class="c">$</span> npx lawscript check src/*.law.ts</span></div>
+          <div class="term" data-at="0.8" style="text-align:left;font-size:24px;min-width:640px"><span><span class="c">$</span> npm install --save-dev tslaw</span><span><span class="c">$</span> brew install z3</span><span><span class="c">$</span> npx tslaw check src/*.law.ts</span></div>
           <p class="lead" data-at="2.5" style="margin-top:26px">Exit code 0 only when every law is proved, so it can gate CI.</p>
         </div>
       </section>

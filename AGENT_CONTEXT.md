@@ -21,7 +21,7 @@ Open a new worktree in this folder, make the changes on a feature branch inside 
 - Animated explainer: `docs/explainer.html` (self-contained, no dependencies; scenes are `<section class="scene">` blocks timed with `data-dur` / `data-at` / `data-lit`). Update it when the pipeline or product name changes.
 
 ## Current State
-Initial prototype (`0.1.0`) implementing **lawscript** (renamed from "vscript" on 2026-11-21 because that npm name was taken; the local folder may still be called `vscript`), a strict verifiable subset of TypeScript checked at compile time with Z3.
+Initial prototype (`0.1.0`) implementing **tslaw** (originally "vscript", whose npm name was taken; briefly "lawscript"; renamed to "tslaw" on 2026-11-21 because it is a checker and library for TypeScript, not a new language. The local folder may still be called `vscript`), a strict verifiable subset of TypeScript checked at compile time with Z3.
 
 Implemented:
 - Three-stage verification pipeline (`src/verify.ts`):
@@ -29,24 +29,24 @@ Implemented:
   2. Strict dialect / soundness checker (`src/dialect.ts`) for `"use verified";` modules (bans `any`, casts, mutation, loops, `throw`/`try`, `number` floats, side effects, and recursive cycles; supports importing pure verified functions and types from other `"use verified";` modules).
   3. SMT-LIB2 lowering (`src/smt.ts`) and Z3 solver runner (`src/z3.ts`) supporting `bigint` (`Int`), `boolean` (`Bool`), immutable `readonly` record types (`declare-datatypes`), `const` bindings, `if`/`else` with early returns, ternaries, helper function calls, and `implies(a, b)`.
 - Runtime shim (`src/runtime.ts`) exporting zero-cost `law(name, fn)` and `implies(p, q)` so verified files remain valid standard TypeScript.
-- CLI (`src/cli.ts`, `lawscript check <files...> [--emit-smt] [--json] [--timeout <ms>]`) reporting `PROVED`, `DISPROVED` (with concrete counterexamples), `UNKNOWN`, `DIALECT ERROR`, and `TYPE ERROR`.
+- CLI (`src/cli.ts`, `tslaw check <files...> [--emit-smt] [--json] [--timeout <ms>]`) reporting `PROVED`, `DISPROVED` (with concrete counterexamples), `UNKNOWN`, `DIALECT ERROR`, and `TYPE ERROR`.
 - Soundness regression suite (`test/soundness.test.ts`, fixtures in `test/fixtures/soundness/`): every PROVED law is run on random inputs in JS, every counterexample is replayed in JS, and laws named `FALSE: ...` / `TRUE: ...` must be disproved / proved. Add a fixture for any future false-PROVED bug.
-- Examples (`examples/tokens.law.ts`, `examples/bank.law.ts`, `examples/buggy.law.ts`, `examples/unsound.law.ts`) and Vitest integration suite (`test/lawscript.test.ts`; negative dialect fixtures in `test/fixtures/dialect/`).
+- Examples (`examples/tokens.law.ts`, `examples/bank.law.ts`, `examples/buggy.law.ts`, `examples/unsound.law.ts`) and Vitest integration suite (`test/tslaw.test.ts`; negative dialect fixtures in `test/fixtures/dialect/`).
 
 ## Important Decisions
 - Opt-in dialect via `"use verified";` directive (like `"use strict";`) rather than forking `tsc`, so verified modules stay standard TypeScript and interoperate with regular TS code.
 - Uses `bigint` for verified integers (exact mathematical `Int` in SMT-LIB2) and rejects `number` to avoid IEEE-754 floating-point unsoundness.
-- Uses native `z3` binary via SMT-LIB2 stdin/stdout (fast, zero WASM startup overhead); solver binary path is configurable via `LAWSCRIPT_Z3` or `--z3`.
+- Uses native `z3` binary via SMT-LIB2 stdin/stdout (fast, zero WASM startup overhead); solver binary path is configurable via `TSLAW_Z3` or `--z3`.
 - Division/modulo (`/` and `%`) are intentionally not yet enabled in v0.1 because JS truncating division toward zero differs from SMT-LIB2 Euclidean `div`/`mod` on negative operands; planned with explicit trunc-div encoding in a future iteration.
 
 - Soundness invariants for the SMT encoding (each once caused false PROVED verdicts):
   - Functions are identified by their `ts.FunctionDeclaration` node (resolved through the type checker, following import aliases), never by name. Each gets a unique SMT name `fn_<index>_<name>`. Aliased imports (`import { f as g }`) work as a result.
-  - `law` and `implies` get special meaning only when they resolve to the real lawscript runtime file (`isVscriptRuntimeFile` in `src/dialect.ts`: this install's `src/runtime.ts` / `dist/runtime.*`, or the same paths in an installed package whose `package.json` name matches ours). Any other function with those names is a normal function.
+  - `law` and `implies` get special meaning only when they resolve to the real tslaw runtime file (`isVscriptRuntimeFile` in `src/dialect.ts`: this install's `src/runtime.ts` / `dist/runtime.*`, or the same paths in an installed package whose `package.json` name matches ours). Any other function with those names is a normal function.
   - SMT identifiers get uniqueness from an index prefix (`p_<i>_`, `arg_<i>_`, `Rec_<n>_<i>_`), never from the sanitized TS name, because sanitizing is lossy (`a$b` and `a_b` collide) and Z3 silently accepts duplicate `define-fun` parameter names.
 
 - Records with extra fields may flow where a narrower record is expected (TS structural subtyping). Each record shape is a distinct SMT datatype, so `src/smt.ts` converts explicitly (`project`) at call arguments, returns, annotated consts, and ternary branches.
 - `@ts-ignore` / `@ts-expect-error` / `@ts-nocheck` are rejected in verified modules (`LAW033`), and Stage 1 also type-checks transitively imported `"use verified";` modules.
-- Packaging: published name `lawscript`, CLI `lawscript`, MIT license, `files` = `dist` + README + LICENSE, Node >= 20. Error codes are `LAW###`; the README has the reference table and must be updated when a code is added.
+- Packaging: published name `tslaw`, CLI `tslaw`, MIT license, `files` = `dist` + README + LICENSE, Node >= 20. Error codes are `LAW###`; the README has the reference table and must be updated when a code is added.
 - CI: `.github/workflows/ci.yml` runs build + tests on Node 20 and 22 with apt-installed Z3.
 
 - Law names are JSON-quoted in the SMT comment header; a raw newline there once allowed SMT injection (`(assert false)` proved anything). Never write user-controlled text into the SMT script unescaped.
@@ -57,7 +57,7 @@ Implemented:
 - The CLI sets `process.exitCode` rather than calling `process.exit()` after output, so large piped output is not truncated.
 
 ## Open Questions / Known Gaps
-- `package.json` `repository` assumes `github.com/Joshua-Wright76/lawscript`; that repo does not exist yet, and CI has never run on GitHub.
+- `package.json` `repository` assumes `github.com/Joshua-Wright76/tslaw`; that repo does not exist yet, and CI has never run on GitHub.
 - `AGENTS.md` and this file describe a personal agent workflow (the preview-port step does not apply to a CLI); decide whether to keep them in the public repo.
 - Division/modulo with exact JS truncation-toward-zero semantics is not yet lowered.
 - Immutable fixed-length tuples, unions/discriminated enums, and bounded arrays are planned next steps.

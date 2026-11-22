@@ -38,7 +38,7 @@ export async function verifyFiles(
 ): Promise<VerifyReport> {
   const absPaths = filePaths.map((p) => path.resolve(p));
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const z3Path = options.z3Path ?? process.env["LAWSCRIPT_Z3"] ?? "z3";
+  const z3Path = options.z3Path ?? process.env["TSLAW_Z3"] ?? "z3";
   const requireDirective = options.requireDirective ?? true;
 
   const compilerOptions: ts.CompilerOptions = {
@@ -84,7 +84,7 @@ export async function verifyFiles(
       continue;
     }
 
-    // Files that have not opted in are skipped entirely; they are not held to lawscript's
+    // Files that have not opted in are skipped entirely; they are not held to tslaw's
     // stricter compiler options.
     if (requireDirective && !hasUseVerifiedDirective(sf)) {
       fileResults.push({ file: absPath, verifiedDirective: false, diagnostics: [], laws: [] });

@@ -4,16 +4,16 @@ import { verifyFiles } from "./verify.js";
 
 function usage(): string {
   return [
-    "lawscript — Verified TypeScript dialect powered by Z3",
+    "tslaw — Verified TypeScript dialect powered by Z3",
     "",
     "Usage:",
-    "  lawscript check <file1.ts> [file2.ts ...] [options]",
+    "  tslaw check <file1.ts> [file2.ts ...] [options]",
     "",
     "Options:",
     "  --emit-smt         Print generated SMT-LIB2 for each law",
     "  --json             Output machine-readable JSON report",
     "  --timeout <ms>     Per-law Z3 timeout in ms (default: 5000)",
-    "  --z3 <path>        Path to z3 binary (default: LAWSCRIPT_Z3 or 'z3')",
+    "  --z3 <path>        Path to z3 binary (default: TSLAW_Z3 or 'z3')",
     "  --all              Verify files even without a '\"use verified\";' directive",
   ].join("\n");
 }

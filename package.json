@@ -1,5 +1,5 @@
 {
-  "name": "lawscript",
+  "name": "tslaw",
   "version": "0.1.0",
   "description": "Verified TypeScript: write laws about pure TypeScript functions and have Z3 prove them at compile time",
   "keywords": ["typescript", "formal-verification", "z3", "smt", "verification", "proof", "static-analysis"],
@@ -7,16 +7,16 @@
   "author": "Joshua Wright",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Joshua-Wright76/lawscript.git"
+    "url": "git+https://github.com/Joshua-Wright76/tslaw.git"
   },
-  "bugs": "https://github.com/Joshua-Wright76/lawscript/issues",
-  "homepage": "https://github.com/Joshua-Wright76/lawscript#readme",
+  "bugs": "https://github.com/Joshua-Wright76/tslaw/issues",
+  "homepage": "https://github.com/Joshua-Wright76/tslaw#readme",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
   "bin": {
-    "lawscript": "./dist/cli.js"
+    "tslaw": "./dist/cli.js"
   },
   "exports": {
     ".": {
@@ -37,7 +37,7 @@
     "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "lawscript": "node dist/cli.js",
+    "tslaw": "node dist/cli.js",
     "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
