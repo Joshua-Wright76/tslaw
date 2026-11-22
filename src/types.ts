@@ -35,7 +35,7 @@ export interface LawResult {
    * callee's `requires` (one result per call), or a recursive call that must make the
    * `decreases` measure smaller (one result per call).
    */
-  readonly kind: "law" | "ensures" | "requires" | "decreases";
+  readonly kind: "law" | "ensures" | "requires" | "decreases" | "invariant";
   readonly name: string;
   readonly location: SourceLocation;
   /** The law's universally quantified parameters, in declaration order. */

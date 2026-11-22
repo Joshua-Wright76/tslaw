@@ -13,6 +13,8 @@
  *   TSLAW_FUZZ_SEED   first seed (default 1)
  *   TSLAW_FUZZ_RUNS   number of generated modules (default 10)
  *   TSLAW_FUZZ_CROSS_CHECK=1   also require cvc5 to agree with Z3 on every law
+ *   TSLAW_FUZZ_DIR    where to write the generated modules (default test/.generated; give
+ *                     concurrent runs different directories)
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -34,8 +36,8 @@ const RUNS = Number(process.env["TSLAW_FUZZ_RUNS"] ?? 10);
 const FUNCTIONS_PER_MODULE = 6;
 const INPUTS_PER_FUNCTION = 3;
 
-const OUT_DIR = path.resolve("test/.generated");
-const RUNTIME = "../../src/runtime.js";
+const OUT_DIR = path.resolve(process.env["TSLAW_FUZZ_DIR"] ?? "test/.generated");
+const RUNTIME = path.relative(OUT_DIR, path.resolve("src/runtime.js")).split(path.sep).join("/");
 
 beforeAll(() => {
   fs.rmSync(OUT_DIR, { recursive: true, force: true });

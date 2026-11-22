@@ -57,6 +57,9 @@ describe("recursion", () => {
       expect(l.status).toBe("unknown");
       expect(l.reason).toMatch(/relies on "termination of loop/);
     }
+    // Induction over a recursion that never ends proves nothing.
+    expect(byName("ensures bottomless")[0]!.status).toBe("unknown");
+    expect(byName("FALSE: bottomless")[0]!.status).toBe("unknown");
     // A postcondition is not assumed while proving itself at the same arguments, and a
     // false one does not make laws provable.
     expect(byName("ensures id").map((l) => l.status)).toEqual(["disproved", "disproved"]);

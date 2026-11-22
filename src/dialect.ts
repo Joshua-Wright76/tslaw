@@ -37,6 +37,8 @@ export interface VerifiedFunction {
   readonly scc: number;
   /** True if the function can (directly or through others) call itself. */
   readonly recursive: boolean;
+  /** True if the function body contains a `while` loop. */
+  readonly hasLoops: boolean;
 }
 
 /** `ensures(fn, (...params, result) => post)`. */
@@ -141,7 +143,7 @@ export function isTslawRuntimeFile(fileName: string): boolean {
 export type CalleeRef =
   | {
       readonly kind: "runtime";
-      readonly helper: "law" | "implies" | "requires" | "ensures" | "decreases";
+      readonly helper: "law" | "implies" | "requires" | "ensures" | "decreases" | "invariant";
     }
   | { readonly kind: "function"; readonly decl: ts.FunctionDeclaration }
   | { readonly kind: "other" };
@@ -163,7 +165,8 @@ export function resolveCallee(checker: ts.TypeChecker, ident: ts.Identifier): Ca
       name === "implies" ||
       name === "requires" ||
       name === "ensures" ||
-      name === "decreases") &&
+      name === "decreases" ||
+      name === "invariant") &&
     isTslawRuntimeFile(decl.getSourceFile().fileName)
   ) {
     return { kind: "runtime", helper: name };
@@ -360,6 +363,8 @@ export function analyzeDialect(
   type ParsedFunction = Omit<VerifiedFunction, "scc" | "recursive"> & {
     /** Functions called from `requires` and `decreases`. */
     readonly specCalls: ReadonlySet<ts.FunctionDeclaration>;
+    /** Functions called from inside loops. */
+    readonly loopCalls: ReadonlySet<ts.FunctionDeclaration>;
   };
   const parsed: ParsedFunction[] = [];
   const functions: VerifiedFunction[] = [];
@@ -487,12 +492,15 @@ export function analyzeDialect(
       readonly requires: ts.Expression[];
       readonly decreases: ts.Expression[];
       readonly calls: Set<ts.FunctionDeclaration>;
+      /** Functions called from inside loops. */
+      readonly loopCalls: Set<ts.FunctionDeclaration>;
       prefixLength: number;
+      hasLoops: boolean;
     },
   ): void => {
     const asSpec = (
       stmt: ts.Statement,
-      helper: "requires" | "decreases",
+      helper: "requires" | "decreases" | "invariant",
     ): ts.CallExpression | undefined => {
       if (
         ts.isExpressionStatement(stmt) &&
@@ -506,6 +514,8 @@ export function analyzeDialect(
     };
     /** Set while checking a `requires`/`decreases` argument. */
     let inSpec = false;
+    /** Number of enclosing `while` loops. */
+    let loopDepth = 0;
     const checkSpecExpr = (expr: ts.Expression, scope: Set<string>): void => {
       inSpec = true;
       try {
@@ -700,6 +710,7 @@ export function analyzeDialect(
         }
         callsOut.add(callee.decl);
         if (inSpec) spec?.calls.add(callee.decl);
+        if (loopDepth > 0) spec?.loopCalls.add(callee.decl);
         for (const arg of expr.arguments) checkExpr(arg, scope);
         return;
       }
@@ -718,26 +729,88 @@ export function analyzeDialect(
       );
     };
 
-    const checkBlock = (block: ts.Block, outerScope: Set<string>, topLevel = false): boolean => {
-      const scope = new Set(outerScope);
+    /** Assignment to a local: `x = e`, `x += e`, `x -= e`, `x *= e`. */
+    const asAssignment = (stmt: ts.Statement): ts.BinaryExpression | undefined => {
+      if (!ts.isExpressionStatement(stmt) || !ts.isBinaryExpression(stmt.expression)) return undefined;
+      const op = stmt.expression.operatorToken.kind;
+      return op === ts.SyntaxKind.EqualsToken ||
+        op === ts.SyntaxKind.PlusEqualsToken ||
+        op === ts.SyntaxKind.MinusEqualsToken ||
+        op === ts.SyntaxKind.AsteriskEqualsToken
+        ? stmt.expression
+        : undefined;
+    };
+
+    interface BlockContext {
+      /** Names in scope. */
+      readonly scope: Set<string>;
+      /** The subset of `scope` declared with `let`. */
+      readonly mutable: Set<string>;
+      /** Inside a loop body, where `return` is not allowed. */
+      readonly inLoop: boolean;
+    }
+
+    const checkAssignment = (assign: ts.BinaryExpression, ctx: BlockContext): void => {
+      if (!ts.isIdentifier(assign.left) || !ctx.mutable.has(assign.left.text)) {
+        addError(
+          "LAW038",
+          "Only a local variable declared with `let` can be assigned",
+          assign.left,
+        );
+      }
+      checkExpr(assign.right, ctx.scope);
+    };
+
+    const checkBlock = (
+      block: ts.Block,
+      outer: BlockContext,
+      kind: "function" | "loop" | "plain" = "plain",
+    ): boolean => {
+      const ctx: BlockContext = {
+        scope: new Set(outer.scope),
+        mutable: new Set(outer.mutable),
+        inLoop: outer.inLoop || kind === "loop",
+      };
+      const { scope } = ctx;
       let terminated = false;
-      let inRequiresPrefix = topLevel && spec !== undefined;
-      let mayDeclareMeasure = inRequiresPrefix;
+      let inRequiresPrefix = kind === "function" && spec !== undefined;
+      let mayDeclareMeasure = inRequiresPrefix || kind === "loop";
+      let inInvariantPrefix = kind === "loop";
+      let hasMeasure = false;
 
       for (const stmt of block.statements) {
+        const inv = asSpec(stmt, "invariant");
+        if (inv) {
+          const cond = inv.arguments[0];
+          if (!inInvariantPrefix) {
+            addError(
+              "LAW038",
+              "`invariant(...)` must be the first statement(s) of a `while` loop body",
+              stmt,
+            );
+          } else if (inv.arguments.length !== 1 || !cond) {
+            addError("LAW038", "`invariant` takes exactly one boolean condition", stmt);
+          } else {
+            requireBoolean(cond);
+            checkExpr(cond, scope);
+          }
+          continue;
+        }
+        inInvariantPrefix = false;
         const dec = asSpec(stmt, "decreases");
         if (dec) {
-          if (!mayDeclareMeasure || !spec) {
+          if (!mayDeclareMeasure) {
             addError(
               "LAW037",
-              "`decreases(...)` must directly follow the `requires` statements at the start of a verified function body, and may appear only once",
+              "`decreases(...)` must directly follow the `requires` statements at the start of a verified function body (or the `invariant` statements at the start of a loop body), and may appear only once",
               stmt,
             );
             continue;
           }
           inRequiresPrefix = false;
           mayDeclareMeasure = false;
-          spec.prefixLength++;
+          hasMeasure = true;
+          if (kind === "function" && spec) spec.prefixLength++;
           if (dec.arguments.length === 0) {
             addError("LAW037", "`decreases` needs at least one `bigint` measure", stmt);
             continue;
@@ -747,8 +820,12 @@ export function analyzeDialect(
             if (t.ok && t.type.kind !== "bigint") {
               addError("LAW037", "Each `decreases` measure must be a `bigint`", m);
             }
-            checkSpecExpr(m, scope);
-            spec.decreases.push(m);
+            if (kind === "function" && spec) {
+              checkSpecExpr(m, scope);
+              spec.decreases.push(m);
+            } else {
+              checkExpr(m, scope);
+            }
           }
           continue;
         }
@@ -781,13 +858,14 @@ export function analyzeDialect(
         }
         if (ts.isVariableStatement(stmt)) {
           const isConst = (stmt.declarationList.flags & ts.NodeFlags.Const) !== 0;
-          if (!isConst) {
-            addError("LAW022", "Mutable bindings (`let`/`var`) are forbidden; use `const`", stmt);
+          const isLet = (stmt.declarationList.flags & ts.NodeFlags.Let) !== 0;
+          if (!isConst && !isLet) {
+            addError("LAW022", "`var` is forbidden; use `const` or `let`", stmt);
             continue;
           }
           for (const decl of stmt.declarationList.declarations) {
             if (!decl.initializer) {
-              addError("LAW022", "`const` declarations must have an initializer", decl);
+              addError("LAW022", "Local declarations must have an initializer", decl);
               continue;
             }
             checkExpr(decl.initializer, scope);
@@ -802,13 +880,16 @@ export function analyzeDialect(
             }
             if (ts.isIdentifier(decl.name)) {
               scope.add(decl.name.text);
-            } else if (ts.isObjectBindingPattern(decl.name)) {
+              if (isLet) ctx.mutable.add(decl.name.text);
+              else ctx.mutable.delete(decl.name.text);
+            } else if (ts.isObjectBindingPattern(decl.name) && isConst) {
               for (const el of decl.name.elements) {
                 if (el.dotDotDotToken || el.initializer || !ts.isIdentifier(el.name)) {
                   addError("LAW022", "Rest/default/nested destructuring is not supported", el);
                   continue;
                 }
                 scope.add(el.name.text);
+                ctx.mutable.delete(el.name.text);
               }
             } else {
               addError("LAW022", "Unsupported binding pattern", decl.name);
@@ -816,8 +897,15 @@ export function analyzeDialect(
           }
           continue;
         }
+        const assign = asAssignment(stmt);
+        if (assign) {
+          checkAssignment(assign, ctx);
+          continue;
+        }
         if (ts.isReturnStatement(stmt)) {
-          if (!stmt.expression) {
+          if (ctx.inLoop) {
+            addError("LAW038", "`return` inside a loop is not supported; leave the loop through its condition", stmt);
+          } else if (!stmt.expression) {
             addError("LAW024", "Bare `return;` is forbidden; verified functions must return a value", stmt);
           } else {
             checkExpr(stmt.expression, scope);
@@ -829,55 +917,53 @@ export function analyzeDialect(
           requireBoolean(stmt.expression);
           checkExpr(stmt.expression, scope);
           const checkBranch = (branch: ts.Statement): boolean => {
-            if (ts.isBlock(branch)) return checkBlock(branch, scope);
-            if (ts.isReturnStatement(branch)) {
-              if (!branch.expression) {
-                addError("LAW024", "Bare `return;` is forbidden", branch);
-              } else {
-                checkExpr(branch.expression, scope);
-              }
-              return true;
-            }
-            if (ts.isIfStatement(branch)) {
-              const synthetic = ts.factory.createBlock([branch]);
-              return checkBlock(synthetic, scope);
+            if (ts.isBlock(branch)) return checkBlock(branch, ctx);
+            if (ts.isReturnStatement(branch) || ts.isIfStatement(branch) || asAssignment(branch)) {
+              return checkBlock(ts.factory.createBlock([branch]), ctx);
             }
             addError(
               "LAW025",
-              "Only blocks, `return`, or `else if` are allowed as `if` branches",
+              "Only blocks, `return`, an assignment, or `else if` are allowed as `if` branches",
               branch,
             );
             return false;
           };
           const thenReturns = checkBranch(stmt.thenStatement);
-          if (stmt.elseStatement) {
-            const elseReturns = checkBranch(stmt.elseStatement);
-            if (thenReturns && elseReturns) {
-              terminated = true;
-            } else if (!thenReturns || !elseReturns) {
-              addError(
-                "LAW025",
-                "Both branches of an `if`/`else` must return in verified modules",
-                stmt,
-              );
-            }
-          } else if (!thenReturns) {
+          const elseReturns = stmt.elseStatement ? checkBranch(stmt.elseStatement) : false;
+          if (thenReturns && elseReturns) terminated = true;
+          continue;
+        }
+        if (ts.isWhileStatement(stmt)) {
+          if (!spec) {
             addError(
-              "LAW025",
-              "An `if` without `else` must end with `return` (guard clause)",
+              "LAW026",
+              "Loops are only allowed in function bodies; move the loop into a verified function",
               stmt,
             );
+            continue;
+          }
+          requireBoolean(stmt.expression);
+          checkExpr(stmt.expression, scope);
+          if (!ts.isBlock(stmt.statement)) {
+            addError("LAW038", "A `while` loop body must be a block", stmt.statement);
+            continue;
+          }
+          if (spec) spec.hasLoops = true;
+          loopDepth++;
+          try {
+            checkBlock(stmt.statement, ctx, "loop");
+          } finally {
+            loopDepth--;
           }
           continue;
         }
         if (
-          ts.isWhileStatement(stmt) ||
           ts.isDoStatement(stmt) ||
           ts.isForStatement(stmt) ||
           ts.isForInStatement(stmt) ||
           ts.isForOfStatement(stmt)
         ) {
-          addError("LAW026", "Loops are forbidden in verified modules (unbounded termination)", stmt);
+          addError("LAW026", "Only `while` loops are supported in verified modules", stmt);
           continue;
         }
         if (ts.isThrowStatement(stmt) || ts.isTryStatement(stmt)) {
@@ -891,11 +977,22 @@ export function analyzeDialect(
         );
       }
 
+      if (kind === "loop" && !hasMeasure) {
+        addError(
+          "LAW038",
+          "A loop needs a termination measure: add `decreases(...)` at the start of its body (after any `invariant`)",
+          block,
+        );
+      }
       return terminated;
     };
 
     if (ts.isBlock(body)) {
-      const returns = checkBlock(body, localNames, true);
+      const returns = checkBlock(
+        body,
+        { scope: localNames, mutable: new Set(), inLoop: false },
+        "function",
+      );
       if (!returns) {
         addError("LAW029", "Verified function/law block must return on every code path", body);
       }
@@ -985,7 +1082,9 @@ export function analyzeDialect(
         requires: [] as ts.Expression[],
         decreases: [] as ts.Expression[],
         calls: new Set<ts.FunctionDeclaration>(),
+        loopCalls: new Set<ts.FunctionDeclaration>(),
         prefixLength: 0,
+        hasLoops: false,
       };
       checkBody(stmt.body, paramScope(stmt.parameters), calls, spec);
       parsed.push({
@@ -993,6 +1092,8 @@ export function analyzeDialect(
         decreases: spec.decreases,
         prefixLength: spec.prefixLength,
         specCalls: spec.calls,
+        loopCalls: spec.loopCalls,
+        hasLoops: spec.hasLoops,
         name: stmt.name.text,
         decl: stmt,
         params,
@@ -1111,6 +1212,7 @@ export function analyzeDialect(
   for (const fn of importedFunctions.values()) nodes.set(fn.decl, fn);
   for (const fn of parsed) nodes.set(fn.decl, fn);
   const specCallsOf = new Map(parsed.map((fn) => [fn.decl, fn.specCalls]));
+  const loopCallsOf = new Map(parsed.map((fn) => [fn.decl, fn.loopCalls]));
 
   const ordered: VerifiedFunction[] = [];
   const index = new Map<ts.FunctionDeclaration, number>();
@@ -1175,6 +1277,15 @@ export function analyzeDialect(
           stage: "dialect",
           code: "LAW037",
           message: `Mutually recursive functions (${names}) must give \`decreases\` the same number of measures`,
+          location: m.location,
+        });
+      }
+      for (const callee of loopCallsOf.get(m.decl) ?? []) {
+        if (!group.has(callee)) continue;
+        diagnostics.push({
+          stage: "dialect",
+          code: "LAW038",
+          message: `A loop in the recursive function \`${m.name}\` may not call \`${callee.name?.text ?? "?"}\`, which is part of the same recursion; move the loop into its own function`,
           location: m.location,
         });
       }

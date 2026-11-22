@@ -69,8 +69,9 @@ describe("tslaw formal verifier", () => {
 
     const codes = new Set(report.files[0]!.diagnostics.map((d) => d.code));
     expect(codes.has("LAW006")).toBe(true); // number param
-    expect(codes.has("LAW022")).toBe(true); // let mutation
-    expect(codes.has("LAW026")).toBe(true); // while loop
+    expect(codes.has("LAW022")).toBe(true); // `var`
+    expect(codes.has("LAW038")).toBe(true); // `while` loop without a termination measure
+    expect(codes.has("LAW026")).toBe(true); // `for` loop
     expect(codes.has("LAW019")).toBe(true); // as cast
   });
 

@@ -52,3 +52,13 @@ export function eager(n: bigint): boolean {
 }
 // In a law nothing runs, so the premise does guard the call.
 law("TRUE: premise guards the call", (n: bigint) => implies(n >= 0n, countdown(n) === 0n));
+
+// "By induction": assume the postcondition for the recursive call and it follows for the
+// body. That argument is only valid when the recursion ends.
+export function bottomless(n: bigint): bigint {
+  decreases(n);
+  return bottomless(n) + 1n;
+}
+
+ensures(bottomless, (_n, result) => result < result);
+law("FALSE: bottomless is below itself", (n: bigint) => bottomless(n) < bottomless(n));

@@ -1,7 +1,7 @@
 /**
  * tslaw runtime helpers.
  *
- * At runtime, `law`, `requires`, `decreases` and `ensures` are no-ops (they are proved statically by
+ * At runtime, `law`, `requires`, `decreases`, `invariant` and `ensures` are no-ops (they are proved statically by
  * `tslaw check`).
  * `implies(p, q)` is standard logical implication (`!p || q`) so laws can also be executed
  * directly in JS/tests against concrete inputs or Z3 counterexamples.
@@ -41,6 +41,17 @@ export function requires(_condition: boolean): void {
  */
 export function decreases(..._measures: bigint[]): void {
   // Proved at every recursive call by tslaw.
+}
+
+/**
+ * Declare a loop invariant. Must be the first statement(s) of a `while` loop body.
+ *
+ * `tslaw check` proves that the condition holds when the loop is first reached and that every
+ * iteration keeps it. In exchange it is known to hold (together with the negated loop
+ * condition) after the loop. At runtime this is a no-op.
+ */
+export function invariant(_condition: boolean): void {
+  // Proved at loop entry and for every iteration by tslaw.
 }
 
 /**

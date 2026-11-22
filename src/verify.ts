@@ -223,10 +223,25 @@ export async function verifyFiles(
       };
     };
 
+    const dependsOn = loweredLaws.map((l) => l.dependsOn);
     const worker = async (): Promise<void> => {
       while (nextIdx < loweredLaws.length) {
         const idx = nextIdx++;
-        lawResults[idx] = await solve(loweredLaws[idx]!);
+        const lowered = loweredLaws[idx]!;
+        // First with recursive functions and loops known only through their proved
+        // postconditions and invariants; if that is not enough, with their definitions.
+        if (lowered.abstract) {
+          const quick = await solve({ ...lowered, smtScript: lowered.abstract.smtScript });
+          if (quick.status === "proved") {
+            lawResults[idx] = quick;
+            dependsOn[idx] = lowered.abstract.dependsOn;
+            continue;
+          }
+          const full = await solve(lowered);
+          lawResults[idx] = { ...full, durationMs: full.durationMs + quick.durationMs };
+          continue;
+        }
+        lawResults[idx] = await solve(lowered);
       }
     };
 
@@ -237,7 +252,6 @@ export async function verifyFiles(
     // the function terminates, and a proof that assumes a postcondition only as good as that
     // postcondition's own proof. Withdraw verdicts whose foundations did not hold, after
     // trying once more without the assumed postconditions.
-    const dependsOn = loweredLaws.map((l) => l.dependsOn);
     const triedPlain = new Set<number>();
     for (let changed = true; changed; ) {
       changed = false;

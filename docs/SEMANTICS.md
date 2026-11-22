@@ -27,10 +27,13 @@ body     ::= e | { block }
 block    ::= const x = e; block
            | const x: T = e; block
            | const { l1: x1, ..., lk: xk } = e; block
-           | if (e) branch else branch
+           | let x = e; block                         (also with a type annotation)
+           | x = e; block                             (x declared with let; also += -= *=)
+           | if (e) branch else branch block?
            | if (e) branch block
+           | while (e) { invariant(e);* decreases(e, ...); block } block
            | return e;
-branch   ::= { block } | return e; | if-statement
+branch   ::= { block } | return e; | x = e; | if-statement
 
 e        ::= x | n | true | false                     (n is a bigint literal)
            | -e | +e | !e
@@ -48,13 +51,15 @@ e        ::= x | n | true | false                     (n is a bigint literal)
 
 Side conditions enforced by the subset check (stage 2):
 
-- Every `block` ends in a `return` on every path.
+- Every path through a function or law body ends in a `return`. A loop body contains no `return`.
+- `while` loops and their `invariant`/`decreases` appear only in function bodies, not in laws or postconditions. A loop in a recursive function does not call into that recursion.
+- Only variables declared with `let` are assigned; parameters, `const`s and record fields never are.
 - Conditions and the operands of `!`, `&&`, `||` have type `boolean`.
 - `f` in a call refers to a top-level function of a verified module; `implies` is the one exported by the tslaw runtime. Both are resolved through the type checker, never by name.
 - A function that can reach itself through calls (directly or through others) is *recursive* and must declare a measure, `decreases(m1, ..., mk)`, directly after its `requires` statements. All functions of one recursion give the same number of measures, and their `requires` and `decreases` do not call into that recursion.
 - Parameter types contain no literal types.
 
-Everything else in TypeScript is rejected. In particular there is no assignment, no loop, no exception, no `number`, no `any`, no cast, and no reference to anything except parameters and local `const`s.
+Everything else in TypeScript is rejected. In particular there is no exception, no `number`, no `any`, no cast, no mutation of a value (only rebinding of a local), and no reference to anything except parameters and local variables.
 
 ## 2. Types and values
 
@@ -131,6 +136,8 @@ E |- e => v
 ---------------------
 E |- return e; => v
 ```
+
+Assignment and loops have their usual meaning: `x = e` replaces the binding of `x` in the environment for the statements that follow (including after the enclosing `if`), `x += e` is `x = x + e`, and `while (c) { body }` evaluates `body` (skipping its `invariant` and `decreases` statements, which do nothing) as long as `c` evaluates to `true`. Since values are immutable and there are no closures, an environment of current bindings is all the state there is.
 
 **Totality.** Every well-typed expression and block evaluates to at most one value. Evaluation cannot get stuck (typing assumption) and cannot throw (no operation in the subset throws on these types). Without recursion it always terminates: expressions are finite, and call depth is bounded by the number of functions. A recursive function terminates on the arguments that satisfy its `requires` when its termination goals (section 4, Recursion) are proved; that is what those goals are for.
 
@@ -294,12 +301,62 @@ Facts are generated for calls in the body of `f`, and for calls written in `post
 
 *Why this is sound.* Take all postconditions of one recursive group together and prove them by well-founded induction on the measure. For arguments `v` with `pre_f(v)`, every call to a group member in the body that is actually reached has a smaller measure (termination goals), so the induction hypothesis gives its postcondition, which is the fact. A call written in `post` is at arbitrary arguments, so no hypothesis applies; assuming the postcondition there would let `ensures(f, (n, r) => f(n) < 0n)` prove itself. Facts about a function `g` outside the group are not hypotheses but previously established results: `g`'s own postconditions are proved using only functions `g` can reach, so there is no cycle between groups.
 
-**Dependencies between verdicts.** A query that contains a recursive definition is meaningful only if that group's termination goals are `PROVED`, and a proof that asserts facts only if the corresponding `ensures` are `PROVED`. After solving, verdicts are adjusted until nothing changes:
+**Dependencies between verdicts.** A query that contains a recursive definition is meaningful only if that group's termination goals are `PROVED`, and a proof that asserts facts only if the corresponding `ensures` (or, for loops, "kept by the body" goals) are `PROVED`.
+
+A goal that has facts is first tried with every recursive function and loop *declared but not defined*, so that only the facts are known about them. This is weaker, hence sound, and it is the form in which inductive arguments go through quickly; if it fails, the goal is tried again with the definitions. Either way the termination goals are dependencies: a fact about a call presumes the call returns (`while (true) {}` would otherwise "establish" `false` after it).
+
+After solving, verdicts are adjusted until nothing changes:
 
 - A `PROVED` verdict with a dependency that is not `PROVED` is retried without facts; if that fails it becomes `UNKNOWN`.
 - A `DISPROVED` verdict becomes `UNKNOWN` if a termination goal it depends on is not `PROVED`. (A failed `ensures` does not affect it: removing an assumption cannot remove a counterexample.)
 
 Mutual dependencies among the postconditions of one group are allowed; they are the simultaneous induction above. Each query includes only the definitions its goal can reach, so an unfounded definition affects only what uses it. When a file imports recursive functions, their termination goals and any assumed postconditions are checked again as part of that file.
+
+### Local variables and loops
+
+**Statements as bindings.** A statement that contains no `return` only changes the environment. Its translation `B[s]G` is a list of `let` bindings together with a new term environment:
+
+```
+B[let x = e]G    = [v := T[e]G],            G[x -> v]                 v fresh
+B[x = e]G        = [v := T[e : A]G],        G[x -> v]                 A the declared type of x
+B[x += e]G       = [v := (+ G(x) T[e]G)],   G[x -> v]
+B[if (c) s1 else s2]G
+                 = B1 ++ B2 ++ [vx := (ite T[c]G G1(x) G2(x))  for each x with G1(x) != G2(x)],
+                   G[x -> vx ...]            where (B1, G1) = B[s1]G and (B2, G2) = B[s2]G
+B[s1; s2]G       = B1 ++ B2,  G2             where (B1, G1) = B[s1]G and (B2, G2) = B[s2]G1
+```
+
+Bindings from both branches of an `if` are placed in front unconditionally. That is harmless because terms have no effects and every SMT function is total; each variable's value is then chosen by the `ite`. Variables declared inside a block are dropped from the environment at its end. A block is translated by wrapping the bindings of its leading statements around the translation of the rest: `T[s; block]G = (let B ... T[block]G')`.
+
+An `if` that contains a `return` is translated as in "Blocks", with the statements after it appended to each branch that can fall through.
+
+**Loops.** Let `x1..xn` be the variables declared outside the loop that it mentions, `M` those among them that it assigns, `I` the conjunction of its `invariant`s (preceded by the enclosing function's `pre_f` when no local hides a parameter), `c` its condition and `(B, G')` the bindings of its body. The loop becomes a recursive function, in a group of its own placed before the enclosing function:
+
+```
+(define-funs-rec ((loop ((p1 ...) ... (pn ...)) State))
+  ((ite I (ite c (let B (loop G'(x1) ... G'(xn))) (mk_State G(m) for m in M)) (undef p1..pn))))
+B[while ...]G = [s := (loop G(x1) ... G(xn))],  G[m -> (S_m s) for m in M]
+```
+
+This is exactly a tail-recursive function with precondition `I`, so the Recursion section applies. Three goals are generated per loop, each for all values of `p1..pn`:
+
+| Goal | Claim |
+|---|---|
+| holds on entry | `context => I[G(xi)]` at the loop, a call-site obligation |
+| kept by the body | `I and c => (let B I[G'(xi)])` |
+| termination | `I and c => (let B measure[G'(xi)] << measure)`, with `loop` declared but not defined |
+
+The "holds on entry" and "kept" goals are omitted when the invariant is only the inherited `pre_f`: parameters are never assigned, so it holds by construction.
+
+**What is known after a loop.** Where facts are generated (see Recursion), each loop application also yields
+
+```
+context  =>  (I[args] => (let ((s (loop args))) (I and not c) at the final values))
+```
+
+*Why this is sound.* By well-founded induction on the measure: if `I` holds and `c` is false, the result is the current state, where `I and not c` holds. If `c` is true, `I` holds for the next arguments ("kept by the body"), the measure is smaller (termination), and the loop's result is the result from there. So the fact depends on the "kept" goal, and on termination. Goals inside a loop may themselves assume only postconditions that lie strictly below the enclosing function, because that function's termination can depend on the loop.
+
+Functions that contain loops are treated like recursive ones in one more respect: their `ensures` are asserted as facts where they are called, since nothing about a loop for all inputs can be learned by unfolding.
 
 ## 5. Verdicts
 

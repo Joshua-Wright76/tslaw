@@ -4,7 +4,8 @@
  * Produces well-typed `"use verified";` modules that exercise every construct the SMT
  * translation supports: bigint/boolean arithmetic and logic, records (including passing a
  * wider record where a narrower one is expected), `const` and destructuring, guard clauses,
- * `if`/`else`, ternaries, `implies`, calls between functions, and recursion.
+ * `if`/`else`, ternaries, `implies`, calls between functions, recursion, and `let` variables
+ * with assignments and `while` loops.
  *
  * `test/fuzz.test.ts` runs each generated function on concrete inputs in real JavaScript and
  * then requires the prover to agree with the result.
@@ -236,6 +237,67 @@ function recursiveFunction(rng: Rng, name: string, fns: ReadonlyArray<GenFunctio
   return { name, params, ret, source, recursive: true };
 }
 
+/** An assignment to `target`, plain or under an `if` (with or without `else`). */
+function assignment(ctx: Ctx, target: Param, indent: string): string[] {
+  const { rng } = ctx;
+  const value = (): string => expr(ctx, target.type, 2);
+  const r = rng();
+  if (r < 0.4) return [`${indent}${target.name} = ${value()};`];
+  if (r < 0.6) return [`${indent}if ${comparison(ctx, 1)} ${target.name} = ${value()};`];
+  if (r < 0.8) {
+    return [
+      `${indent}if ${comparison(ctx, 1)} {`,
+      `${indent}  ${target.name} = ${value()};`,
+      `${indent}} else {`,
+      `${indent}  ${target.name} = ${value()};`,
+      `${indent}}`,
+    ];
+  }
+  // A nested `if` where only the inner branch assigns.
+  return [
+    `${indent}if ${comparison(ctx, 1)} {`,
+    `${indent}  const t: ${target.type} = ${value()};`,
+    `${indent}  if ${comparison(ctx, 1)} ${target.name} = t;`,
+    `${indent}}`,
+  ];
+}
+
+/**
+ * A function with `let` variables, assignments and a `while` loop that runs at most four
+ * times, so any argument is safe to run in JavaScript.
+ */
+function loopFunction(rng: Rng, name: string, fns: ReadonlyArray<GenFunction>): GenFunction {
+  const params: Param[] = [{ name: "p0", type: "bigint" }];
+  const extra = Math.floor(rng() * 3);
+  for (let p = 1; p <= extra; p++) params.push({ name: `p${p}`, type: pick(rng, ALL_TYPES) });
+  const ret = pick(rng, ALL_TYPES);
+  const acc: Param = { name: "acc", type: pick(rng, ALL_TYPES) };
+  const other: Param = { name: "m", type: pick(rng, ALL_TYPES) };
+  const i: Param = { name: "i", type: "bigint" };
+  const outer: Ctx = { rng, env: [...params], fns };
+  const lines = [
+    `  let i = 0n;`,
+    `  let acc: ${acc.type} = ${expr(outer, acc.type, 2)};`,
+    `  let m: ${other.type} = ${expr(outer, other.type, 1)};`,
+  ];
+  const inner: Ctx = { rng, env: [...params, i, acc, other], fns };
+  if (rng() < 0.5) lines.push(...assignment(inner, other, "  "));
+  lines.push(`  while (i < p0 && i < 4n) {`, `    decreases(4n - i);`);
+  lines.push(...assignment(inner, acc, "    "));
+  if (rng() < 0.5) lines.push(...assignment(inner, other, "    "));
+  lines.push(rng() < 0.5 ? `    i = i + 1n;` : `    i += 1n;`, `  }`);
+  if (rng() < 0.5) lines.push(...assignment(inner, acc, "  "));
+  lines.push(block(inner, ret, 2, "  ", { n: 0 }));
+  const sig = params.map((p) => `${p.name}: ${p.type}`).join(", ");
+  return {
+    name,
+    params,
+    ret,
+    source: `export function ${name}(${sig}): ${ret} {\n${lines.join("\n")}\n}`,
+    recursive: true,
+  };
+}
+
 export function generateFunctions(seed: number, count: number, prefix: string): GenFunction[] {
   const rng = makeRng(seed);
   const fns: GenFunction[] = [];
@@ -243,6 +305,10 @@ export function generateFunctions(seed: number, count: number, prefix: string): 
     const name = `${prefix}${i}`;
     if (rng() < 0.25) {
       fns.push(recursiveFunction(rng, name, fns));
+      continue;
+    }
+    if (rng() < 0.25) {
+      fns.push(loopFunction(rng, name, fns));
       continue;
     }
     const params: Param[] = [];

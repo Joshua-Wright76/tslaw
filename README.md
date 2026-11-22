@@ -128,6 +128,42 @@ law("sum is never negative", (n: bigint) => sum(n) >= 0n);
 
 Limits: only the `ensures` of the function being called are used, exactly at its call sites, so a property that needs a cleverer induction has to be restated as an `ensures` of a helper. Deep recursion can still overflow the JavaScript stack at runtime; a termination proof says the recursion ends, not that it fits.
 
+### Loops and local variables
+
+Function bodies may use `let`, assignment (`=`, `+=`, `-=`, `*=`) and `while`:
+
+```ts
+import { decreases, ensures, invariant, requires } from "tslaw/runtime";
+
+export function sumTo(n: bigint): bigint {
+  requires(n >= 0n);
+  let i = 0n;
+  let acc = 0n;
+  while (i < n) {
+    invariant(0n <= i && i <= n);
+    invariant(2n * acc === i * (i + 1n));
+    decreases(n - i);
+    i += 1n;
+    acc += i;
+  }
+  return acc;
+}
+
+ensures(sumTo, (n, result) => 2n * result === n * (n + 1n));
+```
+
+A loop body starts with any number of `invariant(cond)` statements and then one `decreases(...)`. For each loop tslaw proves three things, reported separately:
+
+- `"invariant of the loop at line N: holds on entry"`
+- `"invariant of the loop at line N: kept by the body"` (assuming the invariant and the loop condition before an iteration, the invariant holds after it)
+- `"termination of the loop at line N"` (each iteration makes the measure smaller, and it was at least zero)
+
+In exchange, after the loop the invariant and the negation of the loop condition are known. That is *all* that is known about the variables the loop changed, so the invariant has to say everything the code after the loop needs. In the example, `i <= n` and "not `i < n`" give `i === n`, and the second invariant then gives the postcondition.
+
+The enclosing function's `requires` is part of every invariant automatically. Other facts about variables the loop does not change (for example from an `if` around the loop) have to be repeated in an invariant.
+
+Not supported: `for` and `do` loops, `break`, `continue`, `return` inside a loop, loops inside `law` or `ensures` callbacks, and assigning to parameters or record fields. Records stay immutable: `acc = { ...}` replaces the whole value.
+
 ### Guarding the boundary
 
 Proofs cover calls from verified code. Anything else (plain JavaScript, values typed `any`, parsed JSON) can still call a verified function with arguments that break its types or its `requires`. `tslaw guard` generates a checked entry point for those callers:
@@ -166,15 +202,16 @@ Each file goes through three stages. A failure at any stage stops that file.
 - Top level: `type`/`interface` declarations, function declarations, and `law(name, predicate)` / `ensures(fn, postcondition)` calls.
 - Recursion, direct or mutual, with a `decreases(...)` measure.
 - Functions need explicit parameter and return types.
-- `const` bindings (including object destructuring), `if`/`else` where every path returns, ternaries.
+- `const` and `let` bindings (`const` also with object destructuring), assignment to `let` variables, `if`/`else`, ternaries. Every path through a function must end in `return`.
+- `while` loops with `invariant(...)` and `decreases(...)`.
 - Operators: `+ - *`, comparisons, `===`/`!==` on `bigint` and `boolean`, `&& || !`.
 - Calls to other verified functions, and `implies(p, q)`.
-- Imports: `law`, `implies`, `requires`, `ensures`, `decreases` from `tslaw/runtime`, types from anywhere, and functions from other `"use verified";` modules.
+- Imports: `law`, `implies`, `requires`, `ensures`, `decreases`, `invariant` from `tslaw/runtime`, types from anywhere, and functions from other `"use verified";` modules.
 
 **Not allowed**
 
 - `number` (floating point cannot be modeled exactly; use `bigint`), `any`, `unknown`, `null`/`undefined`, unions, arrays, tuples, strings.
-- `let`/`var`, assignment, loops (use recursion), `throw`/`try`, `async`, generics, classes.
+- `var`, assignment to anything but a local `let`, `for`/`do` loops, `break`/`continue`, `throw`/`try`, `async`, generics, classes.
 - Casts (`as`, `!`) and `@ts-ignore`-style comments.
 - `/` and `%` (JavaScript rounds toward zero and Z3 does not; not yet supported).
 - `===` on records (JavaScript compares identity, not contents; compare fields instead).
@@ -222,11 +259,11 @@ Codes starting with `TS` come from the TypeScript compiler. The rest are tslaw's
 | `LAW019` | Type assertion (`as`, `<T>x`, `x!`). |
 | `LAW020` | Any other unsupported expression. |
 | `LAW021` | Unreachable statement after `return`. |
-| `LAW022` | `let`/`var`, a `const` without an initializer, or an unsupported destructuring pattern. |
+| `LAW022` | `var`, a declaration without an initializer, or an unsupported destructuring pattern. |
 | `LAW023` | Local `const` has an unsupported type. |
 | `LAW024` | Bare `return;`. |
-| `LAW025` | An `if` whose branches do not all return, or with an unsupported branch form. |
-| `LAW026` | Loop. |
+| `LAW025` | An `if` branch that is not a block, a `return`, an assignment, or another `if`. |
+| `LAW026` | A `for`/`do` loop, or a loop outside a function body (in a `law` or `ensures` callback). |
 | `LAW027` | `throw` or `try`. |
 | `LAW028` | Any other unsupported statement. |
 | `LAW029` | Function or law body does not return on every path. |
@@ -238,6 +275,7 @@ Codes starting with `TS` come from the TypeScript compiler. The rest are tslaw's
 | `LAW035` | `requires(...)` that is not at the start of a function body, or with the wrong arguments. |
 | `LAW036` | Malformed `ensures(...)`: needs a verified function and a callback taking its parameters plus the result. |
 | `LAW037` | Malformed `decreases(...)`: not directly after the `requires` statements, repeated, a non-`bigint` measure, a different number of measures than the other functions in the same recursion, or a `requires`/`decreases` that calls the recursion itself. |
+| `LAW038` | Malformed loop or assignment: no `decreases(...)` at the start of the loop body, misplaced `invariant(...)`, `return` inside a loop, assignment to something that is not a local `let`, or a loop in a recursive function that calls back into the recursion. |
 | `LAW040` | `tslaw guard` cannot generate a wrapper: the module is not verified, or a `requires` calls a function that is not exported. |
 | `LAW090` | Internal: translation to SMT failed. Please report it. |
 
