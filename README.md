@@ -75,6 +75,8 @@ There is also a programmatic API: `import { verifyFiles } from "lawscript"`.
 
 ## How it works
 
+For a two-minute animated walkthrough, open [`docs/explainer.html`](docs/explainer.html) in a browser.
+
 Each file goes through three stages. A failure at any stage stops that file.
 
 1. **Type check.** The file and the verified modules it imports are type-checked with `strict`, `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`.

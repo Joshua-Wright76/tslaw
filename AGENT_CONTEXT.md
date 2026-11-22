@@ -18,6 +18,7 @@ Open a new worktree in this folder, make the changes on a feature branch inside 
 ## Canonical References
 - Overall project state: this file
 - Architecture and CLI usage: `README.md`
+- Animated explainer: `docs/explainer.html` (self-contained, no dependencies; scenes are `<section class="scene">` blocks timed with `data-dur` / `data-at` / `data-lit`). Update it when the pipeline or product name changes.
 
 ## Current State
 Initial prototype (`0.1.0`) implementing **lawscript** (renamed from "vscript" on 2026-11-21 because that npm name was taken; the local folder may still be called `vscript`), a strict verifiable subset of TypeScript checked at compile time with Z3.

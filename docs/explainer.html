@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How lawscript works</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .player {
+    --bg: #0d1017; --panel: #161b26; --panel2: #1c2331; --line: #2a3447;
+    --text: #e8ecf4; --muted: #93a0b8; --accent: #7aa2ff; --good: #4fd18b; --bad: #ff6b6b; --warn: #f2c14e;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    max-width: 1000px; margin: 0 auto; background: var(--bg); color: var(--text);
+    border-radius: 14px; overflow: hidden; outline: none;
+  }
+  .stage { position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; cursor: pointer; }
+  .canvas { position: absolute; left: 0; top: 0; width: 1280px; height: 720px; transform-origin: 0 0; }
+
+  /* ---------- scenes ---------- */
+  .scene { position: absolute; inset: 0; padding: 56px 64px 130px; box-sizing: border-box;
+    opacity: 0; visibility: hidden; transition: opacity .45s ease, visibility 0s linear .45s; }
+  .scene.active { opacity: 1; visibility: visible; transition: opacity .45s ease; }
+  .scene h2 { margin: 0 0 6px; font-size: 44px; font-weight: 700; letter-spacing: -.01em; text-wrap: balance; }
+  .scene .kicker { font-size: 20px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); margin-bottom: 10px; }
+  .scene p.lead { margin: 0; font-size: 26px; color: var(--muted); }
+  .center { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; height: 100%; }
+
+  [data-at] { opacity: 0; transform: translateY(14px); transition: opacity .5s ease, transform .5s ease; }
+  [data-at].on { opacity: 1; transform: none; }
+
+  .caption { position: absolute; left: 64px; right: 64px; bottom: 34px; height: 84px; }
+  .caption span { position: absolute; left: 0; right: 0; bottom: 14px; display: block; text-align: center;
+    font-size: 27px; line-height: 1.3; color: var(--text); text-wrap: balance; }
+
+  /* ---------- code ---------- */
+  .code { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 22px;
+    font-family: var(--mono); font-size: 20px; line-height: 1.55; position: relative; }
+  .code .ln { display: block; white-space: pre; border-radius: 6px; margin: 0 -10px; padding: 0 10px; transition: opacity .35s ease, background .35s ease; min-height: 1.55em; }
+  .code.focus .ln { opacity: .28; }
+  .code.focus .ln.lit { opacity: 1; background: rgba(122,162,255,.13); }
+  .k { color: #c792ea; } .s { color: #c3e88d; } .t { color: #82aaff; } .c { color: #6f7c95; } .n { color: #f78c6c; } .f { color: #ffcb6b; }
+  .tag { position: absolute; right: 18px; font-family: ui-sans-serif, system-ui, sans-serif; font-size: 19px; font-weight: 600;
+    background: var(--accent); color: #0b1020; padding: 4px 12px; border-radius: 999px; white-space: nowrap; }
+
+  /* ---------- scene 1 ---------- */
+  .logo { font-family: var(--mono); font-size: 104px; font-weight: 700; letter-spacing: -.03em; }
+  .logo b { color: var(--accent); font-weight: 700; }
+  .sub { font-size: 34px; color: var(--muted); margin-top: 14px; }
+  .pill { margin-top: 44px; font-size: 22px; color: var(--muted); border: 1px solid var(--line); padding: 8px 20px; border-radius: 999px; }
+
+  /* ---------- scene 2: dots ---------- */
+  .dots { display: grid; grid-template-columns: repeat(24, 1fr); gap: 14px 0; margin: 46px 0 0; justify-items: center; }
+  .dot { width: 26px; height: 26px; border-radius: 50%; background: #2a3447; position: relative; opacity: 1 !important; transform: none !important;
+    transition: background .3s ease, box-shadow .3s ease; }
+  .dot.on { background: var(--accent); }
+  .dot.bug.on { background: var(--bad); box-shadow: 0 0 0 7px rgba(255,107,107,.25); }
+  .dot i { position: absolute; inset: -7px; border-radius: 50%; border: 3px solid var(--good); transform: scale(.4) !important; }
+  .dot i.on { transform: none !important; }
+  .rows { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 44px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px 24px; font-size: 24px; }
+  .card b { display: block; font-size: 27px; margin-bottom: 6px; }
+  .card span { color: var(--muted); }
+  .good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--warn); } .acc { color: var(--accent); }
+
+  /* ---------- pipeline ---------- */
+  .pipe { display: grid; grid-template-columns: 1fr 46px 1fr 46px 1fr; align-items: stretch; margin-top: 54px; }
+  .step { background: var(--panel); border: 2px solid var(--line); border-radius: 14px; padding: 24px; transition: border-color .4s ease, background .4s ease, transform .4s ease; }
+  .step.lit { border-color: var(--accent); background: var(--panel2); transform: translateY(-6px); }
+  .step .num { font-size: 18px; font-weight: 700; letter-spacing: .1em; color: var(--accent); }
+  .step h3 { margin: 6px 0 8px; font-size: 30px; }
+  .step p { margin: 0; font-size: 21px; line-height: 1.4; color: var(--muted); }
+  .arrow { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 34px; }
+  .verdicts { display: flex; gap: 16px; justify-content: center; margin-top: 44px; }
+  .chip { font-family: var(--mono); font-size: 22px; font-weight: 700; padding: 8px 18px; border-radius: 8px; border: 2px solid currentColor; }
+
+  /* ---------- lists ---------- */
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 30px; }
+  .list { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 24px; }
+  .list h3 { margin: 0 0 10px; font-size: 24px; }
+  .list div { font-size: 22px; line-height: 1.35; padding: 7px 0; border-top: 1px solid var(--line); display: flex; gap: 14px; align-items: baseline; }
+  .list code { font-family: var(--mono); font-size: 20px; color: var(--text); flex: 0 0 auto; }
+  .list small { font-size: 20px; color: var(--muted); }
+  .opts { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 30px; }
+  .opts code { font-family: var(--mono); font-size: 22px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; }
+  .strike { text-decoration: line-through; text-decoration-color: var(--bad); text-decoration-thickness: 3px; }
+
+  /* ---------- translate ---------- */
+  .split { display: grid; grid-template-columns: 566px 1fr; gap: 20px; margin-top: 22px; }
+  .split .code { font-size: 16.5px; line-height: 1.42; padding: 12px 18px; }
+  .split .head { font-size: 18px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-bottom: 8px; }
+
+  /* ---------- question ---------- */
+  .ask { margin: 34px auto 0; max-width: 980px; text-align: center; background: var(--panel); border: 2px solid var(--accent); border-radius: 14px; padding: 22px 28px; font-size: 32px; font-weight: 600; text-wrap: balance; }
+  .outs { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 30px; }
+  .out { background: var(--panel); border: 2px solid var(--line); border-radius: 14px; padding: 22px 26px; }
+  .out .z { font-family: var(--mono); font-size: 24px; color: var(--muted); }
+  .out h3 { margin: 8px 0 6px; font-size: 28px; font-weight: 600; }
+  .out .v { font-family: var(--mono); font-size: 30px; font-weight: 700; margin-top: 12px; }
+
+  /* ---------- terminal ---------- */
+  .term { background: #05070b; border: 1px solid var(--line); border-radius: 12px; padding: 18px 22px; font-family: var(--mono); font-size: 20px; line-height: 1.6; margin-top: 26px; }
+  .term > span { display: block; white-space: pre; }
+  .eval { margin-top: 22px; display: grid; grid-template-columns: 1fr auto 1fr; gap: 18px; align-items: center; }
+  .eval .code { font-size: 21px; white-space: pre; }
+  .eval .arrow { font-size: 40px; }
+
+  .three { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; margin-top: 32px; }
+  .three .card b { font-size: 25px; }
+  .three .card { font-size: 22px; line-height: 1.4; }
+  .limits { margin-top: 24px; font-size: 23px; color: var(--muted); display: grid; gap: 8px; }
+  .limits b { color: var(--text); font-weight: 600; }
+
+  /* ---------- controls ---------- */
+  .big-play { position: absolute; inset: 0; display: flex; align-items: flex-end; justify-content: center; padding-bottom: 7%; pointer-events: none; transition: opacity .3s ease; }
+  .big-play div { background: var(--accent); color: #0b1020; font-weight: 700; font-size: clamp(13px, 2vw, 18px); padding: .6em 1.3em; border-radius: 999px; display: flex; gap: .5em; align-items: center; }
+  .player.started .big-play { opacity: 0; }
+  .bar { display: flex; align-items: center; gap: 12px; padding: 10px 14px 12px; border-top: 1px solid var(--line); background: #0a0d13; font-size: 13px; }
+  .bar button { background: transparent; border: 1px solid var(--line); color: var(--text); border-radius: 8px; height: 32px; min-width: 36px; padding: 0 9px;
+    font: inherit; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+  .bar button:hover { background: var(--panel2); }
+  .bar button:focus-visible, .track:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .bar svg { width: 14px; height: 14px; fill: currentColor; display: block; }
+  .track { flex: 1; height: 32px; position: relative; cursor: pointer; touch-action: none; min-width: 60px; }
+  .track::before { content: ""; position: absolute; left: 0; right: 0; top: 14px; height: 4px; border-radius: 2px; background: var(--line); }
+  .fill { position: absolute; left: 0; top: 14px; height: 4px; border-radius: 2px; background: var(--accent); }
+  .knob { position: absolute; top: 9px; width: 14px; height: 14px; margin-left: -7px; border-radius: 50%; background: #fff; }
+  .tick { position: absolute; top: 12px; width: 2px; height: 8px; background: var(--bg); }
+  .time { font-family: var(--mono); color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .chapter { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 30%; }
+  @media (max-width: 560px) { .chapter { display: none; } }
+  @media (prefers-reduced-motion: reduce) { .scene, [data-at], .code .ln, .step, .dot { transition-duration: .01s !important; } }
+</style>
+</head>
+<body>
+<div class="player" id="player" tabindex="0" aria-label="How lawscript works, animated explainer">
+  <div class="stage" id="stage">
+    <div class="canvas" id="canvas">
+
+      <!-- 1 -->
+      <section class="scene" data-dur="7" data-title="Intro">
+        <div class="center">
+          <div class="logo" data-at="0"><b>law</b>script</div>
+          <div class="sub" data-at="0">Proofs for TypeScript functions, checked by Z3</div>
+          <div class="pill" data-at="0">How it works, in about two minutes</div>
+        </div>
+      </section>
+
+      <!-- 2 -->
+      <section class="scene" data-dur="15" data-title="Tests vs. laws">
+        <div class="kicker">The idea</div>
+        <h2>A test checks some inputs. A law covers all of them.</h2>
+        <div class="dots" id="dots"></div>
+        <div class="rows">
+          <div class="card" data-at="2.6"><b class="good">Tests: 4 inputs, all pass</b><span>They only cover the cases you thought of.</span></div>
+          <div class="card" data-at="8.8"><b class="bad">Law: one input breaks it</b><span>The bug was sitting where nobody looked.</span></div>
+        </div>
+        <div class="caption">
+          <span data-at="0.3" data-until="5.6">Each dot is a possible input. Your tests try a handful.</span>
+          <span data-at="5.6" data-until="11">A law is a claim about <em>every</em> input, including the ones you forgot.</span>
+          <span data-at="11">lawscript checks laws with a theorem prover, so nothing is left out.</span>
+        </div>
+      </section>
+
+      <!-- 3 -->
+      <section class="scene" data-dur="17" data-title="What you write">
+        <div class="kicker">What you write</div>
+        <h2>Ordinary TypeScript, plus laws</h2>
+        <div class="code" style="margin-top:16px;line-height:1.45">
+<span class="ln" data-lit="1.5,5"><span class="s">"use verified"</span>;</span><span class="ln"><span class="k">import</span> { law, implies } <span class="k">from</span> <span class="s">"lawscript/runtime"</span>;</span><span class="ln"> </span><span class="ln" data-lit="5,10"><span class="k">type</span> <span class="t">Result</span> = { <span class="k">readonly</span> from: <span class="t">bigint</span>; <span class="k">readonly</span> to: <span class="t">bigint</span> };</span><span class="ln" data-lit="5,10"><span class="k">export function</span> <span class="f">transfer</span>(from: <span class="t">bigint</span>, to: <span class="t">bigint</span>, amount: <span class="t">bigint</span>): <span class="t">Result</span> {</span><span class="ln" data-lit="5,10">  <span class="k">if</span> (amount &gt; from) <span class="k">return</span> { from, to };</span><span class="ln" data-lit="5,10">  <span class="k">return</span> { from: from - amount, to: to + amount };</span><span class="ln" data-lit="5,10">}</span><span class="ln"> </span><span class="ln" data-lit="10,17"><span class="f">law</span>(<span class="s">"balances never go negative"</span>, (from: <span class="t">bigint</span>, to: <span class="t">bigint</span>, amount: <span class="t">bigint</span>) =&gt; {</span><span class="ln" data-lit="10,17">  <span class="k">const</span> next = <span class="f">transfer</span>(from, to, amount);</span><span class="ln" data-lit="10,17">  <span class="k">return</span> <span class="f">implies</span>(from &gt;= <span class="n">0n</span> &amp;&amp; to &gt;= <span class="n">0n</span>, next.from &gt;= <span class="n">0n</span> &amp;&amp; next.to &gt;= <span class="n">0n</span>);</span><span class="ln" data-lit="10,17">});</span></div>
+        <div class="caption">
+          <span data-at="0.2" data-until="5">One line opts the file in. Everything else in your project is untouched.</span>
+          <span data-at="5" data-until="10">Your functions are plain TypeScript. This one moves tokens between two balances.</span>
+          <span data-at="10">A law is a function that must return <em>true</em> for every possible argument.</span>
+        </div>
+      </section>
+
+      <!-- 4 -->
+      <section class="scene" data-dur="13" data-title="The pipeline">
+        <div class="kicker">lawscript check</div>
+        <h2>Each file goes through three stages</h2>
+        <div class="pipe">
+          <div class="step" data-lit="1.5,4.5"><div class="num">STAGE 1</div><h3>Type check</h3><p>TypeScript's own compiler, on its strictest settings.</p></div>
+          <div class="arrow">→</div>
+          <div class="step" data-lit="4.5,7.5"><div class="num">STAGE 2</div><h3>Subset check</h3><p>Only code with an exact meaning in logic is allowed.</p></div>
+          <div class="arrow">→</div>
+          <div class="step" data-lit="7.5,13"><div class="num">STAGE 3</div><h3>Proof</h3><p>Translate to math and ask Z3 about each law.</p></div>
+        </div>
+        <div class="verdicts" data-at="8.5">
+          <span class="chip good">PROVED</span><span class="chip bad">DISPROVED</span><span class="chip warn">UNKNOWN</span>
+        </div>
+        <div class="caption">
+          <span data-at="0.2" data-until="7.5">A file that fails a stage stops there, with an error pointing at the line.</span>
+          <span data-at="7.5">Each law that reaches the end gets a verdict.</span>
+        </div>
+      </section>
+
+      <!-- 5 -->
+      <section class="scene" data-dur="10" data-title="Stage 1: type check">
+        <div class="kicker">Stage 1</div>
+        <h2>Type check</h2>
+        <p class="lead">The proof assumes the types are true, so they have to be.</p>
+        <div class="opts">
+          <code data-at="1">strict</code>
+          <code data-at="1.5">noUncheckedIndexedAccess</code>
+          <code data-at="2">exactOptionalPropertyTypes</code>
+        </div>
+        <div class="cols">
+          <div class="card" data-at="3.5"><b>Imports are checked too</b><span>Every verified file this one imports goes through the same check.</span></div>
+          <div class="card" data-at="5.5"><b><span class="strike">// @ts-ignore</span></b><span>Comments that silence the type checker are rejected.</span></div>
+        </div>
+        <div class="caption">
+          <span data-at="0.2">This is the regular TypeScript compiler. No fork, no new syntax.</span>
+        </div>
+      </section>
+
+      <!-- 6 -->
+      <section class="scene" data-dur="17" data-title="Stage 2: subset check">
+        <div class="kicker">Stage 2</div>
+        <h2>Only code that math can describe exactly</h2>
+        <div class="cols">
+          <div class="list" data-at="1">
+            <h3 class="good">Allowed</h3>
+            <div><code>bigint</code><small>exact whole numbers</small></div>
+            <div><code>boolean</code><small>true or false</small></div>
+            <div><code>readonly</code><small>records that never change</small></div>
+            <div><code>const  if  ? :</code><small>every path returns</small></div>
+            <div><code>+ - *  &lt; ===  &amp;&amp; ||</code><small>calls to verified functions</small></div>
+          </div>
+          <div class="list">
+            <h3 class="bad" data-at="5">Rejected, and why</h3>
+            <div data-at="5.5"><code>number</code><small>floating point isn't exact</small></div>
+            <div data-at="7"><code>let  loops  recursion</code><small>must be pure and must finish</small></div>
+            <div data-at="8.5"><code>any  as  !</code><small>they let types lie</small></div>
+            <div data-at="10"><code>/  %</code><small>JS rounds differently from Z3</small></div>
+            <div data-at="11.5"><code>throw  async</code><small>a function is just inputs to output</small></div>
+          </div>
+        </div>
+        <div class="caption">
+          <span data-at="0.2" data-until="5">What's left after this check is a small, predictable slice of TypeScript.</span>
+          <span data-at="5" data-until="13">Anything the translation can't get exactly right is refused, not guessed at.</span>
+          <span data-at="13">That refusal is the point: a proof about an approximation would be worthless.</span>
+        </div>
+      </section>
+
+      <!-- 7 -->
+      <section class="scene" data-dur="20" data-title="Stage 3: translation">
+        <div class="kicker">Stage 3</div>
+        <h2>Translate TypeScript into logic</h2>
+        <div class="split">
+          <div>
+            <div class="head">Your TypeScript</div>
+            <div class="code">
+<span class="ln" data-lit="1.5,5.5"><span class="k">type</span> <span class="t">Result</span> = {</span><span class="ln" data-lit="1.5,5.5">  <span class="k">readonly</span> from: <span class="t">bigint</span>; <span class="k">readonly</span> to: <span class="t">bigint</span>;</span><span class="ln" data-lit="1.5,5.5">};</span><span class="ln" data-lit="5.5,10"><span class="k">function</span> <span class="f">transfer</span>(</span><span class="ln" data-lit="5.5,10">  from: <span class="t">bigint</span>, to: <span class="t">bigint</span>, amount: <span class="t">bigint</span>,</span><span class="ln" data-lit="5.5,10">): <span class="t">Result</span> {</span><span class="ln" data-lit="5.5,10">  <span class="k">if</span> (amount &gt; from) <span class="k">return</span> { from, to };</span><span class="ln" data-lit="5.5,10">  <span class="k">return</span> { from: from - amount, to: to + amount };</span><span class="ln" data-lit="5.5,10">}</span><span class="ln" data-lit="10,13.5"><span class="f">law</span>(<span class="s">"balances never go negative"</span>,</span><span class="ln" data-lit="10,13.5">  (from: <span class="t">bigint</span>, to: <span class="t">bigint</span>, amount: <span class="t">bigint</span>) =&gt; {</span><span class="ln" data-lit="13.5,20">    <span class="k">const</span> next = <span class="f">transfer</span>(from, to, amount);</span><span class="ln" data-lit="13.5,20">    <span class="k">return</span> <span class="f">implies</span>(from &gt;= <span class="n">0n</span> &amp;&amp; to &gt;= <span class="n">0n</span>,</span><span class="ln" data-lit="13.5,20">      next.from &gt;= <span class="n">0n</span> &amp;&amp; next.to &gt;= <span class="n">0n</span>);</span><span class="ln" data-lit="13.5,20">});</span></div>
+          </div>
+          <div>
+            <div class="head">What Z3 receives (names simplified)</div>
+            <div class="code">
+<span class="ln" data-lit="1.5,5.5">(<span class="k">declare-datatypes</span> ((<span class="t">Result</span> 0))</span><span class="ln" data-lit="1.5,5.5">  (((mk (from <span class="t">Int</span>) (to <span class="t">Int</span>)))))</span><span class="ln" data-lit="5.5,10">(<span class="k">define-fun</span> <span class="f">transfer</span></span><span class="ln" data-lit="5.5,10">    ((from <span class="t">Int</span>) (to <span class="t">Int</span>) (amount <span class="t">Int</span>)) <span class="t">Result</span></span><span class="ln" data-lit="5.5,10">  (<span class="k">ite</span> (&gt; amount from)</span><span class="ln" data-lit="5.5,10">       (mk from to)</span><span class="ln" data-lit="5.5,10">       (mk (- from amount) (+ to amount))))</span><span class="ln" data-lit="10,13.5">(<span class="k">declare-const</span> from <span class="t">Int</span>)</span><span class="ln" data-lit="10,13.5">(<span class="k">declare-const</span> to <span class="t">Int</span>)</span><span class="ln" data-lit="10,13.5">(<span class="k">declare-const</span> amount <span class="t">Int</span>)</span><span class="ln" data-lit="13.5,20">(<span class="k">assert</span> (<span class="bad">not</span></span><span class="ln" data-lit="13.5,20">  (<span class="k">let</span> ((next (<span class="f">transfer</span> from to amount)))</span><span class="ln" data-lit="13.5,20">    (=&gt; (and (&gt;= from <span class="n">0</span>) (&gt;= to <span class="n">0</span>))</span><span class="ln" data-lit="13.5,20">        (and (&gt;= (from next) <span class="n">0</span>) (&gt;= (to next) <span class="n">0</span>))))))</span><span class="ln" data-lit="13.5,20">(<span class="k">check-sat</span>)</span></div>
+          </div>
+        </div>
+        <div class="caption">
+          <span data-at="0.2" data-until="5.5">A readonly record becomes a datatype. A <em>bigint</em> becomes a true mathematical integer.</span>
+          <span data-at="5.5" data-until="10">A function becomes a definition. <em>if</em> becomes <em>ite</em>: if-then-else.</span>
+          <span data-at="10" data-until="13.5">The law's parameters become unknowns. Z3 is free to pick any values for them.</span>
+          <span data-at="13.5">The law itself is wrapped in <em class="bad">not</em>. That one word is the whole trick.</span>
+        </div>
+      </section>
+
+      <!-- 8 -->
+      <section class="scene" data-dur="17" data-title="The question for Z3">
+        <div class="kicker">Stage 3</div>
+        <h2>Ask Z3 to break the law</h2>
+        <div class="ask" data-at="0.8">“Is there <em>any</em> input that makes this law false?”</div>
+        <div class="outs">
+          <div class="out" data-at="4">
+            <div class="z">Z3 answers: unsat</div>
+            <h3>No such input can exist.</h3>
+            <div class="v good">PROVED</div>
+          </div>
+          <div class="out" data-at="8">
+            <div class="z">Z3 answers: sat</div>
+            <h3>Yes, and here it is.</h3>
+            <div class="v bad">DISPROVED + counterexample</div>
+          </div>
+        </div>
+        <div class="caption">
+          <span data-at="0.2" data-until="4">Proving “always true” directly is hard. Searching for one failure is what solvers do.</span>
+          <span data-at="4" data-until="8">If no failure can exist, the law holds for every input. That is a proof.</span>
+          <span data-at="8" data-until="12.5">If one exists, Z3 hands back the exact values.</span>
+          <span data-at="12.5">Z3 doesn't try inputs one at a time. It reasons about all of them at once, with algebra.</span>
+        </div>
+      </section>
+
+      <!-- 9 -->
+      <section class="scene" data-dur="18" data-title="A counterexample">
+        <div class="kicker">In practice</div>
+        <h2>The transfer function has a bug</h2>
+        <div class="term"><span data-at="0.8"><span class="c">$</span> lawscript check transfer.law.ts</span><span data-at="2.2">  <span class="bad">DISPROVED</span> "balances never go negative"</span><span data-at="3.2">            Counterexample: from = <span class="n">0n</span>, to = <span class="n">8855n</span>, amount = <span class="n">-8856n</span></span></div>
+        <div class="eval">
+          <div class="code" data-at="6"><span class="f">transfer</span>(<span class="n">0n</span>, <span class="n">8855n</span>, <span class="n">-8856n</span>)</div>
+          <div class="arrow" data-at="7.5">→</div>
+          <div class="code" data-at="7.5">{ from: <span class="n">8856n</span>, to: <span class="bad">-1n</span> }</div>
+        </div>
+        <div class="term" data-at="12.5" style="margin-top:22px"><span><span class="c">// fix: </span><span class="k">if</span> (amount &lt;= <span class="n">0n</span> || amount &gt; from) <span class="k">return</span> { from, to };</span><span>  <span class="good">PROVED</span>    "balances never go negative"</span></div>
+        <div class="caption">
+          <span data-at="0.2" data-until="6">Nobody wrote a test with a negative amount. Z3 found one anyway.</span>
+          <span data-at="6" data-until="12.5">Run it for real: a negative transfer pulls the receiver below zero.</span>
+          <span data-at="12.5">Add the missing check, and the same law is proved for every input.</span>
+        </div>
+      </section>
+
+      <!-- 10 -->
+      <section class="scene" data-dur="19" data-title="Can you trust PROVED?">
+        <div class="kicker">Trust</div>
+        <h2>What keeps PROVED honest</h2>
+        <div class="three">
+          <div class="card" data-at="1.5"><b class="acc">Random runs</b>Every proved law is also run in real JavaScript on hundreds of random inputs.</div>
+          <div class="card" data-at="4"><b class="acc">Replayed failures</b>Every counterexample is run for real and must actually break the law.</div>
+          <div class="card" data-at="6.5"><b class="acc">A file per past bug</b>Each way lawscript was once fooled is kept as a test that must never pass again.</div>
+        </div>
+        <div class="limits">
+          <div data-at="10.5"><b>It proves your laws,</b> not that you wrote the right laws.</div>
+          <div data-at="12.5"><b>law() does nothing at runtime.</b> The checking all happens before you ship.</div>
+          <div data-at="14.5"><b>Unverified callers aren't checked.</b> Proofs cover well-typed inputs only.</div>
+        </div>
+        <div class="caption">
+          <span data-at="0.2" data-until="10">A proof is only as good as the translation, so the test suite cross-checks it against real runs.</span>
+          <span data-at="10">And a proof has limits worth knowing.</span>
+        </div>
+      </section>
+
+      <!-- 11 -->
+      <section class="scene" data-dur="9" data-title="Try it">
+        <div class="center">
+          <h2 data-at="0.2">Try it</h2>
+          <div class="term" data-at="0.8" style="text-align:left;font-size:24px;min-width:640px"><span><span class="c">$</span> npm install --save-dev lawscript</span><span><span class="c">$</span> brew install z3</span><span><span class="c">$</span> npx lawscript check src/*.law.ts</span></div>
+          <p class="lead" data-at="2.5" style="margin-top:26px">Exit code 0 only when every law is proved, so it can gate CI.</p>
+        </div>
+      </section>
+
+    </div>
+    <div class="big-play"><div><svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M3 1.5v13l11-6.5z"/></svg>Play</div></div>
+  </div>
+
+  <div class="bar">
+    <button id="btnPlay" aria-label="Play"><svg viewBox="0 0 16 16"><path id="icoPlay" d="M3 1.5v13l11-6.5z"/></svg></button>
+    <button id="btnPrev" aria-label="Previous scene"><svg viewBox="0 0 16 16"><path d="M2 2h2v12H2zM14 2v12L5 8z"/></svg></button>
+    <button id="btnNext" aria-label="Next scene"><svg viewBox="0 0 16 16"><path d="M12 2h2v12h-2zM2 2v12l9-6z"/></svg></button>
+    <div class="track" id="track" role="slider" tabindex="0" aria-label="Seek" aria-valuemin="0"><div class="fill" id="fill"></div><div class="knob" id="knob"></div></div>
+    <span class="time" id="time">0:00 / 0:00</span>
+    <span class="chapter" id="chapter"></span>
+    <button id="btnSpeed" aria-label="Playback speed">1×</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const player = $("player"), stage = $("stage"), canvas = $("canvas"), track = $("track");
+
+  // Scene 2: a field of inputs. Four get tested; later a sweep covers all and finds the bug.
+  const dots = $("dots");
+  const COUNT = 72, BUG = 31, TESTED = [40, 45, 52, 58];
+  for (let i = 0; i < COUNT; i++) {
+    const d = document.createElement("div");
+    d.className = "dot" + (i === BUG ? " bug" : "");
+    d.dataset.at = (6 + i * 0.035).toFixed(3);
+    const t = TESTED.indexOf(i);
+    if (t >= 0) {
+      const ring = document.createElement("i");
+      ring.dataset.at = (0.9 + t * 0.4).toFixed(2);
+      d.appendChild(ring);
+    }
+    dots.appendChild(d);
+  }
+
+  const scenes = [...document.querySelectorAll(".scene")].map((el) => ({
+    el,
+    dur: Number(el.dataset.dur),
+    title: el.dataset.title,
+    timed: [...el.querySelectorAll("[data-at]")].map((n) => ({
+      n, at: Number(n.dataset.at), until: n.dataset.until ? Number(n.dataset.until) : Infinity,
+    })),
+    lit: [...el.querySelectorAll("[data-lit]")].map((n) => {
+      const [a, b] = n.dataset.lit.split(",").map(Number);
+      return { n, a, b };
+    }),
+    codes: [...el.querySelectorAll(".code")],
+  }));
+  let acc = 0;
+  for (const s of scenes) { s.start = acc; acc += s.dur; }
+  const TOTAL = acc;
+
+  for (const s of scenes) {
+    const tick = document.createElement("div");
+    tick.className = "tick";
+    tick.style.left = (s.start / TOTAL) * 100 + "%";
+    if (s.start > 0) track.appendChild(tick);
+  }
+
+  let t = 0, playing = false, speed = 1, last = 0;
+  const fmt = (x) => Math.floor(x / 60) + ":" + String(Math.floor(x % 60)).padStart(2, "0");
+  const sceneAt = (time) => {
+    for (let i = scenes.length - 1; i >= 0; i--) if (time >= scenes[i].start) return i;
+    return 0;
+  };
+
+  function render() {
+    const idx = sceneAt(Math.min(t, TOTAL - 0.001));
+    scenes.forEach((s, i) => s.el.classList.toggle("active", i === idx));
+    const s = scenes[idx], st = t - s.start;
+    for (const { n, at, until } of s.timed) n.classList.toggle("on", st >= at && st < until);
+    for (const { n, a, b } of s.lit) n.classList.toggle("lit", st >= a && st < b);
+    for (const c of s.codes) c.classList.toggle("focus", c.querySelector(".lit") !== null);
+    const pct = (t / TOTAL) * 100 + "%";
+    $("fill").style.width = pct;
+    $("knob").style.left = pct;
+    $("time").textContent = fmt(t) + " / " + fmt(TOTAL);
+    $("chapter").textContent = idx + 1 + "/" + scenes.length + " · " + s.title;
+    track.setAttribute("aria-valuemax", Math.round(TOTAL));
+    track.setAttribute("aria-valuenow", Math.round(t));
+  }
+
+  function setPlaying(p) {
+    if (p && t >= TOTAL) t = 0;
+    playing = p;
+    if (p) player.classList.add("started");
+    $("icoPlay").setAttribute("d", p ? "M3 2h4v12H3zM9 2h4v12H9z" : "M3 1.5v13l11-6.5z");
+    $("btnPlay").setAttribute("aria-label", p ? "Pause" : "Play");
+    if (p) { last = performance.now(); requestAnimationFrame(frame); }
+  }
+  function frame(now) {
+    if (!playing) return;
+    t += ((now - last) / 1000) * speed;
+    last = now;
+    if (t >= TOTAL) { t = TOTAL; setPlaying(false); }
+    render();
+    if (playing) requestAnimationFrame(frame);
+  }
+  function seek(time) {
+    t = Math.max(0, Math.min(TOTAL, time));
+    player.classList.add("started");
+    render();
+  }
+  const jump = (dir) => {
+    const idx = sceneAt(Math.min(t, TOTAL - 0.001));
+    if (dir < 0) seek(t - scenes[idx].start > 1.5 ? scenes[idx].start : scenes[Math.max(0, idx - 1)].start);
+    else if (idx < scenes.length - 1) seek(scenes[idx + 1].start);
+  };
+
+  $("btnPlay").onclick = () => setPlaying(!playing);
+  stage.onclick = () => setPlaying(!playing);
+  $("btnPrev").onclick = () => jump(-1);
+  $("btnNext").onclick = () => jump(1);
+  $("btnSpeed").onclick = (e) => {
+    speed = speed === 1 ? 1.5 : speed === 1.5 ? 2 : 1;
+    e.currentTarget.textContent = speed + "×";
+  };
+
+  const seekFromEvent = (e) => {
+    const r = track.getBoundingClientRect();
+    seek(((e.clientX - r.left) / r.width) * TOTAL);
+  };
+  track.addEventListener("pointerdown", (e) => { track.setPointerCapture(e.pointerId); seekFromEvent(e); });
+  track.addEventListener("pointermove", (e) => { if (track.hasPointerCapture(e.pointerId)) seekFromEvent(e); });
+
+  player.addEventListener("keydown", (e) => {
+    if (e.key === " " && e.target.tagName !== "BUTTON") { e.preventDefault(); setPlaying(!playing); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); e.shiftKey ? jump(1) : seek(t + 5); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); e.shiftKey ? jump(-1) : seek(t - 5); }
+  });
+
+  // The scenes are laid out on a fixed 1280×720 canvas and scaled to fit, like a video frame.
+  const fit = () => { canvas.style.transform = "scale(" + stage.clientWidth / 1280 + ")"; };
+  new ResizeObserver(fit).observe(stage);
+  fit();
+  render();
+})();
+</script>
+</body>
+</html>
