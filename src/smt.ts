@@ -53,6 +53,13 @@ export interface LoweredLaw {
    */
   readonly dependsOn: ReadonlyArray<number>;
   /**
+   * The subset of dependencies without which even a counterexample means nothing: the
+   * termination of the recursive functions and loops involved and, for laws and
+   * postconditions, every precondition and invariant that the code they run relies on. (The
+   * rest are assumed postconditions, whose failure cannot invalidate a counterexample.)
+   */
+  readonly foundations: ReadonlyArray<number>;
+  /**
    * The same goal without the assumed postconditions (present when there are any). If one of
    * those postconditions turns out not to hold, the goal may still be provable this way.
    */
@@ -564,9 +571,17 @@ export function lowerModuleLaws(
         // throws at runtime), so those helpers come with a precondition like any `requires`.
         const [first, ...others] = expr.arguments;
         if (!first) throw new Error(`\`${fnName}\` needs an array argument`);
-        const type = resolveExprVType(first);
+        // The array type is the one TypeScript chose for this call (`T` may be narrower than
+        // the first argument's own element type, as in `append([wide], narrow)`).
+        const signature = checker.getResolvedSignature(expr);
+        const param = signature?.parameters[0];
+        const declared = param
+          ? resolveVType(checker, checker.getTypeOfSymbolAtLocation(param, expr))
+          : undefined;
+        const type = declared?.ok ? declared.type : resolveExprVType(first);
         if (type.kind !== "array") throw new Error(`\`${fnName}\` needs an array argument`);
-        const xs = lowerExpr(first, env);
+        registry.register(type);
+        const xs = lowerExpr(first, env, type);
         const argument = (i: number, expected?: VType): string => {
           const arg = others[i];
           if (!arg) throw new Error(`Wrong number of arguments in call to \`${fnName}\``);
@@ -700,6 +715,8 @@ export function lowerModuleLaws(
      * declared without a definition. Used for the goals that justify the definition itself.
      */
     readonly opaque?: number;
+    /** For a law or postcondition: the call-site goals of its own expression. */
+    readonly own?: ReadonlyArray<number>;
     /** False for goals of imported modules, which are emitted only if something needs them. */
     readonly local: boolean;
   }
@@ -707,6 +724,17 @@ export function lowerModuleLaws(
   let obligationId = 0;
   /** For each recursive group, the goals (indices into `pending`) that prove it terminates. */
   const terminationGoals = new Map<number, number[]>();
+  /**
+   * For each unit, the goals (indices into `pending`) that its code is only meaningful under:
+   * preconditions of the calls it makes, invariants holding on entry to its loops and being
+   * kept by them. The model leaves a recursive function unspecified outside its precondition
+   * and a loop unspecified outside its invariant, and `at`/`slice`/`withAt` throw out of range,
+   * so a law about code where one of these can fail says nothing about what really happens.
+   */
+  const unitChecks = new Map<number, number[]>();
+  const addCheck = (unit: number, goal: number): void => {
+    unitChecks.set(unit, [...(unitChecks.get(unit) ?? []), goal]);
+  };
   /** For each postcondition, the goal (index into `pending`) that proves it. */
   const ensuresGoals = new Map<number, number>();
 
@@ -1067,6 +1095,7 @@ export function lowerModuleLaws(
     const maintenance: number[] = [];
     if (invName && invariants.length > 0) {
       maintenance.push(pending.length);
+      addCheck(unit, pending.length);
       pending.push({
         ...common,
         kind: "invariant",
@@ -1087,10 +1116,9 @@ export function lowerModuleLaws(
       ),
       opaque: unit,
     });
-    if (local) {
-      for (const ob of mergeObligations(trace.obligations)) {
-        pending.push({ ...common, kind: ob.kind, goal: obligationGoal(ob, params), claim: ob.formula });
-      }
+    for (const ob of mergeObligations(trace.obligations)) {
+      addCheck(unit, pending.length);
+      pending.push({ ...common, kind: ob.kind, goal: obligationGoal(ob, params), claim: ob.formula });
     }
 
     const info: LoopInfo = {
@@ -1450,11 +1478,11 @@ export function lowerModuleLaws(
     const local = isLocal(fn.decl.getSourceFile().fileName);
     const argNames = argNamesFor(fn.params);
     for (const ob of mergeObligations(trace.obligations)) {
-      // Preconditions of calls in imported modules are checked with those modules. Their
-      // termination is checked here too if needed, because definitions here rely on it.
-      if (!local && ob.kind !== "decreases") continue;
+      // Goals of imported modules are emitted too, but kept only if a verdict in this file
+      // rests on them.
       const name = `ob_${obligationId++}`;
       const definitional = ob.kind === "decreases";
+      if (!definitional) addCheck(unit, pending.length);
       const known = definitional ? scope.strict : scope;
       if (definitional) {
         const goals = terminationGoals.get(unit) ?? [];
@@ -1503,7 +1531,9 @@ export function lowerModuleLaws(
     });
     const local = isLocal(l.location.file);
     const plain = scope.facts.length > 0 ? { plain: { defs: [], assumptions: [] } } : {};
+    const own: number[] = [];
     for (const ob of mergeObligations(trace.obligations)) {
+      own.push(pending.length);
       pending.push({
         kind: ob.kind,
         goal: obligationGoal(ob, l.params),
@@ -1529,6 +1559,7 @@ export function lowerModuleLaws(
       posts: scope.posts,
       factGoals: scope.goals,
       ...plain,
+      own,
       local,
     });
   }
@@ -1578,8 +1609,15 @@ export function lowerModuleLaws(
     });
 
     // Calls written in the postcondition itself are at arbitrary arguments, so no induction
-    // hypothesis applies to them: only functions that cannot reach this one may be assumed.
-    scope.allowed = (callee) => !reach(unitOf.get(callee.decl)!).has(unit);
+    // hypothesis applies to them. Only postconditions of functions strictly below this one
+    // (it can reach them, they cannot reach it) may be assumed there. "Cannot reach it" alone
+    // is not enough: two unrelated functions could then each have a false postcondition about
+    // the other, and each proof would assume the other's claim.
+    const reachable = reach(unit);
+    scope.allowed = (callee) => {
+      const u = unitOf.get(callee.decl)!;
+      return reachable.has(u) && !reach(u).has(unit);
+    };
     const result = nextVar("result");
     postEnv.set(resultParam.name, project(result, fn.returnType, resultParam.type));
     let postSmt = "";
@@ -1600,22 +1638,22 @@ export function lowerModuleLaws(
       scope.facts.length > 0
         ? { plain: { defs: [], assumptions: preTerm ? [preTerm] : [] } }
         : {};
-    if (local) {
-      for (const ob of mergeObligations(postTrace.obligations)) {
-        pending.push({
-          kind: ob.kind,
-          goal: obligationGoal(ob, params),
-          argNames,
-          defs: [],
-          assumptions: scope.facts,
-          claim: ob.formula,
-          roots,
-          posts: scope.posts,
-          factGoals: scope.goals,
-          ...plain,
-          local,
-        });
-      }
+    const own: number[] = [];
+    for (const ob of mergeObligations(postTrace.obligations)) {
+      own.push(pending.length);
+      pending.push({
+        kind: ob.kind,
+        goal: obligationGoal(ob, params),
+        argNames,
+        defs: [],
+        assumptions: scope.facts,
+        claim: ob.formula,
+        roots,
+        posts: scope.posts,
+        factGoals: scope.goals,
+        ...plain,
+        local,
+      });
     }
     ensuresGoals.set(j, pending.length);
     pending.push({
@@ -1633,6 +1671,7 @@ export function lowerModuleLaws(
       posts: scope.posts,
       factGoals: scope.goals,
       ...plain,
+      own,
       local,
     });
   });
@@ -1649,7 +1688,7 @@ export function lowerModuleLaws(
     posts: ReadonlySet<number>,
     withFacts_: boolean,
     abstract = false,
-  ): { script: string; deps: Set<number> } => {
+  ): { script: string; deps: Set<number>; hard: Set<number> } => {
     // Definitions in dependency order: everything a unit mentions comes before it.
     const order: number[] = [];
     const seen = new Set<number>();
@@ -1664,8 +1703,11 @@ export function lowerModuleLaws(
     for (const u of [...roots].sort((a, b) => a - b)) include(u);
 
     const fnDefs: string[] = [];
-    const deps = new Set<number>();
+    const hard = new Set<number>();
+    const runs = p.kind === "law" || p.kind === "ensures";
+    if (runs) for (const g of p.own ?? []) hard.add(g);
     for (const u of order) {
+      if (runs) for (const g of unitChecks.get(u) ?? []) hard.add(g);
       if (u === p.opaque) {
         fnDefs.push(...units[u]!.opaque);
         continue;
@@ -1674,9 +1716,10 @@ export function lowerModuleLaws(
       // (its postcondition, its invariant and negated condition after it) presumes that it
       // returns. `while (true)` "establishes" `false` afterwards, so termination is always
       // a dependency.
-      if (units[u]!.recursive) for (const g of terminationGoals.get(u) ?? []) deps.add(g);
+      if (units[u]!.recursive) for (const g of terminationGoals.get(u) ?? []) hard.add(g);
       fnDefs.push(...(abstract && units[u]!.recursive ? units[u]!.opaque : units[u]!.def));
     }
+    const deps = new Set(hard);
     for (const j of posts) deps.add(ensuresGoals.get(j)!);
     if (withFacts_) for (const g of p.factGoals) deps.add(g);
 
@@ -1697,7 +1740,7 @@ export function lowerModuleLaws(
     if (p.argNames.length > 0) {
       lines.push(`(get-value (${p.argNames.map((a) => a.smtName).join(" ")}))`);
     }
-    return { script: lines.join("\n") + "\n", deps };
+    return { script: lines.join("\n") + "\n", deps, hard };
   };
   const assembled = pending.map((p) => ({
     pending: p,
@@ -1723,7 +1766,7 @@ export function lowerModuleLaws(
     [...deps].map((d) => newIndex.get(d)!).sort((a, b) => a - b);
 
   return kept.map((old) => {
-    const { pending: p, script, deps, plain, abstract } = assembled[old]!;
+    const { pending: p, script, deps, hard, plain, abstract } = assembled[old]!;
     return {
       kind: p.kind,
       law: p.goal,
@@ -1731,6 +1774,7 @@ export function lowerModuleLaws(
       paramSmtNames: p.argNames,
       recordsByCtor,
       dependsOn: remap(deps),
+      foundations: remap(hard),
       ...(plain ? { plain: { smtScript: plain.script, dependsOn: remap(plain.deps) } } : {}),
       ...(abstract
         ? { abstract: { smtScript: abstract.script, dependsOn: remap(abstract.deps) } }

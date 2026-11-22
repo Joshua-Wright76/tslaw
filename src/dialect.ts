@@ -693,6 +693,13 @@ export function analyzeDialect(
               : "Property access is only allowed on verified `readonly` records",
             expr,
           );
+        } else if (!objType.type.fields.some((f) => f.name === expr.name.text)) {
+          // Every object also has inherited members (`constructor`, `toString`, ...).
+          addError(
+            "LAW016",
+            `\`${expr.name.text}\` is not a declared field of this record`,
+            expr.name,
+          );
         }
         return;
       }

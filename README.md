@@ -98,7 +98,7 @@ export function withdraw(acc: Account, amount: bigint): Account {
 ensures(withdraw, (acc, amount, result) => result.balance === acc.balance - amount);
 ```
 
-- `requires(cond)` must come first in the function body. tslaw proves, for **every call from verified code**, that the condition holds at that call, taking into account the `if`, ternary, `&&`, `||` and `implies` conditions around it. A call that can violate it is reported as `DISPROVED "requires of withdraw at line N"` with the arguments that break it.
+- `requires(cond)` must come first in the function body. tslaw proves, for **every call from verified code**, that the condition holds at that call, taking into account the `if`, ternary, `&&`, `||` and `implies` conditions around it. A call that can violate it is reported as `DISPROVED "requires of withdraw at line N"` with the arguments that break it. Laws and postconditions about code that contains such a call get no verdict (`UNKNOWN`, "relies on ...") until it is fixed, so in a law you state the precondition as a hypothesis: `implies(amount > 0n && amount <= acc.balance, ...)`.
 - `ensures(fn, (...args, result) => cond)` is proved for all arguments that satisfy the function's `requires`.
 - Both do nothing at runtime, like `law`. They do not stop unverified code from calling the function with bad arguments; for that, see the next section.
 

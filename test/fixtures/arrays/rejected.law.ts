@@ -25,3 +25,9 @@ export function tuple(pair: readonly [bigint, bigint]): bigint {
 export function untyped(): bigint {
   return len([]);
 }
+
+export type Box = { readonly v: bigint };
+
+export function inherited(r: Box): boolean {
+  return r.constructor === r.constructor;
+}

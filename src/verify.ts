@@ -268,11 +268,11 @@ export async function verifyFiles(
             ? dependsOn[idx]!.find((d) => lawResults[d]!.status !== "proved")
             : res.status === "disproved" || res.status === "error"
               ? // A counterexample still stands if an assumed postcondition fails (assuming
-                // less cannot remove it), but not if a definition it uses is unfounded. In
-                // that case the solvers may even disagree, since the query is contradictory.
-                dependsOn[idx]!.find(
-                  (d) => lawResults[d]!.kind === "decreases" && lawResults[d]!.status !== "proved",
-                )
+                // less cannot remove it), but not if a definition it uses is unfounded (the
+                // solvers may then even disagree, since the query is contradictory) or if a
+                // precondition or invariant on the way can fail (the model is unspecified
+                // there).
+                lowered.foundations.find((d) => lawResults[d]!.status !== "proved")
               : undefined;
         if (failed === undefined) continue;
         changed = true;

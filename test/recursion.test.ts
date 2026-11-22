@@ -87,7 +87,21 @@ describe("recursion", () => {
     expect(status("FALSE: nest is positive")).toEqual(["unknown"]);
     // An unsatisfiable precondition makes the definition say nothing, not everything.
     expect(status("termination of never")).toEqual(["proved"]);
-    expect(status("FALSE: never is its own successor")).toEqual(["disproved"]);
+    // (Every call violates the precondition, so the law about such a call gets no verdict.)
+    expect(status("requires of never at line 31")).toEqual(["disproved", "disproved"]);
+    expect(status("FALSE: never is its own successor")).toEqual(["unknown"]);
+  });
+
+  it("does not let postconditions of unrelated functions prove each other", async () => {
+    const report = await verifyFiles([`${DIR}/unrelated.law.ts`]);
+    const laws = report.files[0]!.laws;
+    checkNamedLaws(laws);
+    const status = (name: string): string[] =>
+      laws.filter((l) => l.name.startsWith(name)).map((l) => l.status);
+    for (const fn of ["g", "h", "a", "b"]) expect(status(`ensures ${fn}`)).toEqual(["disproved"]);
+    expect(status("termination of spin")).toEqual(["disproved"]);
+    expect(status("FALSE: h is one")).toEqual(["disproved"]);
+    expect(status("FALSE: a is one")).toEqual(["disproved"]);
   });
 
   it("uses postconditions of recursive functions from imported modules", async () => {

@@ -295,7 +295,7 @@ The first four rows match exactly when JavaScript evaluates the call. The last d
 
 where the result is `f`'s translated body (the same value as `f' a1..an`; the Recursion section below says why the body is used).
 
-**What contracts add to the theorems.** Function calls are still translated through their definitions, so the theorems of section 6 hold whether or not the obligations are proved. If all call-site obligations in a module are `PROVED`, then additionally: in any evaluation that starts from a law, or from a function whose `requires` holds, every call reached under the conditions in the table above satisfies its callee's `requires`.
+**What contracts add to the theorems.** If the call-site obligations are `PROVED`, then in any evaluation that starts from a law, or from a function whose `requires` holds, every call reached under the conditions in the table above satisfies its callee's `requires`. A law or postcondition is reported as `PROVED` or `DISPROVED` only when that is established for all the code it runs (see "Dependencies between verdicts"), so its verdict is never about an evaluation that leaves a precondition.
 
 ### Recursion
 
@@ -337,9 +337,9 @@ The result is the translated body rather than a call. Each `fact` comes from a c
 context  =>  (pre_g(args) => post_g(args, g'(args)))
 ```
 
-Facts are generated for calls in the body of `f`, and for calls written in `post` itself only when `g` cannot reach `f` in the call graph. They are also generated for calls in laws, and in the bodies of functions when proving call-site obligations there.
+Facts are generated for calls in the body of `f`, and for calls written in `post` itself only when `g` is *strictly below* `f` in the call graph: `f` can reach `g` and `g` cannot reach `f`. They are also generated for calls in laws, and in the bodies of functions when proving call-site obligations there.
 
-*Why this is sound.* Take all postconditions of one recursive group together and prove them by well-founded induction on the measure. For arguments `v` with `pre_f(v)`, every call to a group member in the body that is actually reached has a smaller measure (termination goals), so the induction hypothesis gives its postcondition, which is the fact. A call written in `post` is at arbitrary arguments, so no hypothesis applies; assuming the postcondition there would let `ensures(f, (n, r) => f(n) < 0n)` prove itself. Facts about a function `g` outside the group are not hypotheses but previously established results: `g`'s own postconditions are proved using only functions `g` can reach, so there is no cycle between groups.
+*Why this is sound.* Take all postconditions of one recursive group together and prove them by well-founded induction on the measure. For arguments `v` with `pre_f(v)`, every call to a group member in the body that is actually reached has a smaller measure (termination goals), so the induction hypothesis gives its postcondition, which is the fact. A call written in `post` is at arbitrary arguments, so no hypothesis applies; assuming the postcondition there would let `ensures(f, (n, r) => f(n) < 0n)` prove itself. Facts about a function `g` outside the group are not hypotheses but previously established results, and for that their proofs must not depend on `f`'s in turn. That is why `g` has to be strictly below `f`: the proof of a postcondition of `f` then uses only postconditions of functions below `f` (or of its own group, as induction hypotheses), and "below" is well-founded. "Cannot reach `f`" alone would not do. Two unrelated functions could each carry a false postcondition about the other, such as `ensures(g, (n, r) => h(n) === 1n)` and `ensures(h, (n, r) => g(n) === 1n)`, and each proof would assume the other's claim; an earlier version did exactly that.
 
 **Dependencies between verdicts.** A query that contains a recursive definition is meaningful only if that group's termination goals are `PROVED`, and a proof that asserts facts only if the corresponding `ensures` (or, for loops, "kept by the body" goals) are `PROVED`.
 
@@ -348,7 +348,9 @@ A goal that has facts is first tried with every recursive function and loop *dec
 After solving, verdicts are adjusted until nothing changes:
 
 - A `PROVED` verdict with a dependency that is not `PROVED` is retried without facts; if that fails it becomes `UNKNOWN`.
-- A `DISPROVED` verdict becomes `UNKNOWN` if a termination goal it depends on is not `PROVED`. (A failed `ensures` does not affect it: removing an assumption cannot remove a counterexample.)
+- A `DISPROVED` verdict becomes `UNKNOWN` if one of its *foundations* is not `PROVED`. (A failed `ensures` is not a foundation: removing an assumption cannot remove a counterexample.)
+
+The foundations of any goal are the termination goals of the recursive functions and loops in its query. For a law or postcondition, which are claims about what running the code returns, they also include every call-site obligation and loop-invariant goal ("holds on entry", "kept by the body") of the law itself and of every function and loop its query contains. The model deliberately says nothing about a recursive function outside its precondition or a loop outside its invariant, and `at`, `slice` and `withAt` throw outside their ranges, so where one of those goals can fail the model and the program may part ways: a "proof" might be about a call that throws, and a "counterexample" might use a value the program never produces.
 
 Mutual dependencies among the postconditions of one group are allowed; they are the simultaneous induction above. Each query includes only the definitions its goal can reach, so an unfounded definition affects only what uses it. When a file imports recursive functions, their termination goals and any assumed postconditions are checked again as part of that file.
 
@@ -414,7 +416,7 @@ Let `enc` map values to SMT values: integers and booleans to themselves, a recor
 
 *Argument.* By induction on the call depth, then on the structure of `e`. Each translation rule in section 4 is the SMT-LIB counterpart of the evaluation rule in section 3 with the same shape: `Int` arithmetic and comparison in SMT-LIB are exact integer operations, which is what ECMAScript specifies for `bigint` `+ - * < <= > >=` and `===`; `ite`, `and`, `or`, `not`, `=>` and `let` have their standard meaning; datatype selectors return the constructor's arguments. The projection case uses that `enc` at a supertype is `enc` at the subtype followed by dropping fields. Function calls use the induction hypothesis on call depth. Without recursion that is well-founded because the call graph is acyclic, and `define-fun` is macro expansion, so the definitions are satisfiable and determine the functions uniquely. For recursive groups whose termination goals are proved, section 4 (Recursion) gives the same two facts on the arguments that satisfy the preconditions.
 
-Both theorems below are stated for final verdicts, after the dependency adjustment of section 4: every recursive function used has proved termination goals, and every assumed fact a proved `ensures`. For recursive functions they cover evaluations in which each call satisfies its callee's `requires` (the call-site obligations); outside its precondition a recursive function's value is unspecified in the model.
+Both theorems below are stated for final verdicts, after the dependency adjustment of section 4: every recursive function and loop used has proved termination goals, every assumed fact a proved `ensures`, and every precondition and invariant in the code that runs is proved to hold where it is needed.
 
 **Theorem (PROVED is sound).** If Z3 answers `unsat` for a law's query, then for all values `v1 in V(T1), ..., vn in V(Tn)`, the law's body evaluates to `true`.
 

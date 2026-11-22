@@ -56,11 +56,29 @@ describe("arrays", () => {
     expect(failed[0]!.counterexample![0]!.raw).toEqual([]);
   });
 
+  it("withdraws verdicts about code whose preconditions can fail", async () => {
+    const report = await verifyFiles([`${DIR}/checks.law.ts`]);
+    expect(report.files[0]!.diagnostics).toEqual([]);
+    const laws = report.files[0]!.laws;
+    const status = (prefix: string): string => laws.find((l) => l.name.startsWith(prefix))!.status;
+    // `append([wide], narrow)` builds the array at the element type TypeScript chose.
+    expect(status("TRUE: mixedAppend")).toBe("proved");
+    // A call that always throws, an invariant that is false on entry, and a helper that reads
+    // out of range: the model is unspecified there, so no verdict is given either way.
+    for (const name of ["FALSE: backwards", "UNDECIDED: badEntry", "FALSE: firstOrZero"]) {
+      const l = laws.find((x) => x.name.startsWith(name))!;
+      expect(l.status, name).toBe("unknown");
+      expect(l.reason).toMatch(/relies on "(requires of|invariant of)/);
+    }
+    // Unrelated code is unaffected.
+    expect(status("TRUE: count of three")).toBe("proved");
+  });
+
   it("rejects array syntax that has no exact model", async () => {
     const report = await verifyFiles([`${DIR}/rejected.law.ts`]);
     const at_ = (code: string): number[] =>
       report.files[0]!.diagnostics.filter((d) => d.code === code).map((d) => d.location!.line).sort((a, b) => a - b);
-    expect(at_("LAW016")).toEqual([6]); // xs.length
+    expect(at_("LAW016")).toEqual([6, 32, 32]); // xs.length; r.constructor (twice)
     expect(at_("LAW015")).toEqual([14]); // xs === ys
     expect(at_("LAW039")).toEqual([10, 18, 22, 26]); // xs[0]; spread; tuple; `[]` of unknown element type
     expect(at_("LAW006")).toEqual([21]); // tuple parameter

@@ -61,10 +61,10 @@ describe("loops", () => {
     expect(status("invariant of the loop at line 33: kept by the body")).toBe("disproved");
     // Nothing can be concluded from a loop that may not end.
     expect(status("FALSE: stuck returns anything")).toBe("unknown");
-    // An invariant that is not kept gives nothing after the loop: the postcondition it would
-    // imply is refuted by running the loop.
-    expect(status("ensures notKept")).toBe("disproved");
-    expect(status("FALSE: notKept is zero")).toBe("disproved");
+    // A loop whose invariant is not kept is unspecified in the model after the first
+    // iteration, so nothing about the function is proved or refuted.
+    expect(status("ensures notKept")).toBe("unknown");
+    expect(status("FALSE: notKept is zero")).toBe("unknown");
     // `while (true)` makes the negated condition `false` afterwards; that must prove nothing.
     expect(status("ensures forever")).toBe("unknown");
     expect(status("FALSE: forever is below itself")).toBe("unknown");
