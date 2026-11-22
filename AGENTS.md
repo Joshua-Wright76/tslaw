@@ -1,3 +1,3 @@
-# Agent Instructions
+# Contributor & Agent Guide
 
-Before doing anything in this project, read [AGENT_CONTEXT.md](AGENT_CONTEXT.md). It contains essential context about the project that you must follow.
+Before making changes to **tslaw**, read [AGENT_CONTEXT.md](AGENT_CONTEXT.md) for the architecture, soundness invariants, and testing workflow.

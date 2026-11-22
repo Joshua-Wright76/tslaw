@@ -340,7 +340,7 @@ npm run build
 npm test          # needs z3 on PATH; takes about a minute
 npm run prove     # optional: check proofs/Core.lean (needs Lean 4, https://lean-lang.org/install/)
 
-node dist/cli.js check examples/tokens.law.ts examples/bank.law.ts   # all proved
+node dist/cli.js check examples/tokens.law.ts examples/bank.law.ts examples/math.law.ts examples/ledger.law.ts  # all proved
 node dist/cli.js check examples/buggy.law.ts                         # a counterexample
 node dist/cli.js check examples/unsound.law.ts                       # dialect errors
 node dist/cli.js check examples/tokens.law.ts --emit-smt             # see the SMT-LIB2

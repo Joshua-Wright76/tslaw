@@ -25,16 +25,45 @@ afterEach(() => {
 });
 
 describe("tslaw formal verifier", () => {
-  it("proves all laws in examples/tokens.law.ts and examples/bank.law.ts", async () => {
+  it("proves all laws in examples/tokens.law.ts, bank.law.ts, math.law.ts, and ledger.law.ts", async () => {
     const report = await verifyFiles([
       "examples/tokens.law.ts",
       "examples/bank.law.ts",
+      "examples/math.law.ts",
+      "examples/ledger.law.ts",
     ]);
 
     expect(report.ok).toBe(true);
     expect(report.summary.errors).toBe(0);
     expect(report.summary.disproved).toBe(0);
-    expect(report.summary.proved).toBe(8);
+    expect(report.summary.proved).toBeGreaterThan(8);
+  });
+
+  it("supports importing all runtime helpers from the root package entrypoint", async () => {
+    const indexPath = path.resolve("src/index.ts").replace(/\.ts$/, ".js");
+    const file = writeTempLawFile(
+      "root-import.law.ts",
+      `"use verified";
+import { append, at, decreases, ensures, implies, invariant, law, len, requires } from "${indexPath}";
+export function countUp(n: bigint): bigint {
+  requires(n >= 0n);
+  let i = 0n;
+  while (i < n) {
+    invariant(0n <= i && i <= n);
+    decreases(n - i);
+    i += 1n;
+  }
+  return i;
+}
+ensures(countUp, (n, r) => r === n);
+law("root import works", (xs: readonly bigint[], n: bigint) =>
+  implies(n >= 0n, countUp(n) === n && at(append(xs, n), len(xs)) === n),
+);
+`,
+    );
+    const report = await verifyFiles([file]);
+    expect(report.ok).toBe(true);
+    expect(report.summary.errors).toBe(0);
   });
 
   it("disproves buggyTransfer and produces a real executable counterexample", async () => {

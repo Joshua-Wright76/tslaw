@@ -138,7 +138,7 @@ describe("soundness: fixtures that once produced false PROVED verdicts", () => {
 });
 
 describe("soundness: examples agree with runtime execution", () => {
-  it.each(["examples/tokens.law.ts", "examples/bank.law.ts", "examples/buggy.law.ts"])(
+  it.each(["examples/tokens.law.ts", "examples/bank.law.ts", "examples/buggy.law.ts", "examples/ledger.law.ts"])(
     "%s",
     async (file) => {
       const laws = await verifyAndReplay(file);

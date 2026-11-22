@@ -24,7 +24,7 @@ jobs:
       - run: npm run build
       - run: npm test
       - name: Check the examples with the built CLI
-        run: node dist/cli.js check examples/tokens.law.ts examples/bank.law.ts
+        run: node dist/cli.js check examples/tokens.law.ts examples/bank.law.ts examples/math.law.ts examples/ledger.law.ts
 
   proofs:
     runs-on: ubuntu-latest
