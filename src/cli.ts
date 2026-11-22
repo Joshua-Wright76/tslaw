@@ -4,16 +4,16 @@ import { verifyFiles } from "./verify.js";
 
 function usage(): string {
   return [
-    "vscript — Verified TypeScript dialect powered by Z3",
+    "lawscript — Verified TypeScript dialect powered by Z3",
     "",
     "Usage:",
-    "  vscript check <file1.ts> [file2.ts ...] [options]",
+    "  lawscript check <file1.ts> [file2.ts ...] [options]",
     "",
     "Options:",
     "  --emit-smt         Print generated SMT-LIB2 for each law",
     "  --json             Output machine-readable JSON report",
     "  --timeout <ms>     Per-law Z3 timeout in ms (default: 5000)",
-    "  --z3 <path>        Path to z3 binary (default: VSCRIPT_Z3 or 'z3')",
+    "  --z3 <path>        Path to z3 binary (default: LAWSCRIPT_Z3 or 'z3')",
     "  --all              Verify files even without a '\"use verified\";' directive",
   ].join("\n");
 }
@@ -94,7 +94,8 @@ async function main(): Promise<void> {
       console.log(`\n${label}`);
       for (const d of f.diagnostics) {
         const loc = d.location ? `:${d.location.line}:${d.location.column}` : "";
-        console.log(`  FAIL [${d.stage.toUpperCase()} ${d.code}] ${label}${loc}`);
+        const where = d.location ? rel(d.location.file) : label;
+        console.log(`  FAIL [${d.stage.toUpperCase()} ${d.code}] ${where}${loc}`);
         console.log(`       ${d.message}`);
       }
       continue;

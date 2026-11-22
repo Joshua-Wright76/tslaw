@@ -1,20 +1,44 @@
 {
-  "name": "vscript",
+  "name": "lawscript",
   "version": "0.1.0",
-  "description": "Verified TypeScript dialect — compile-time formal verification of pure TS subsets via Z3",
+  "description": "Verified TypeScript: write laws about pure TypeScript functions and have Z3 prove them at compile time",
+  "keywords": ["typescript", "formal-verification", "z3", "smt", "verification", "proof", "static-analysis"],
+  "license": "MIT",
+  "author": "Joshua Wright",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Joshua-Wright76/lawscript.git"
+  },
+  "bugs": "https://github.com/Joshua-Wright76/lawscript/issues",
+  "homepage": "https://github.com/Joshua-Wright76/lawscript#readme",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "bin": {
-    "vscript": "./dist/cli.js"
+    "lawscript": "./dist/cli.js"
   },
   "exports": {
-    ".": "./dist/index.js",
-    "./runtime": "./dist/runtime.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./runtime": {
+      "types": "./dist/runtime.d.ts",
+      "default": "./dist/runtime.js"
+    }
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "build": "tsc",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "vscript": "node dist/cli.js"
+    "lawscript": "node dist/cli.js",
+    "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
     "typescript": "^5.9.0"

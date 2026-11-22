@@ -1,6 +1,6 @@
 import path from "node:path";
 import ts from "typescript";
-import { analyzeDialect, getLocation } from "./dialect.js";
+import { analyzeDialect, getLocation, hasUseVerifiedDirective } from "./dialect.js";
 import { lowerModuleLaws } from "./smt.js";
 import type {
   Diagnostic,
@@ -13,13 +13,32 @@ import { runZ3 } from "./z3.js";
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
+/** Transitive `"use verified";` source modules imported by `root` (excluding `root`). */
+function verifiedDeps(root: ts.SourceFile, checker: ts.TypeChecker): ts.SourceFile[] {
+  const seen = new Set<ts.SourceFile>([root]);
+  const out: ts.SourceFile[] = [];
+  const visit = (sf: ts.SourceFile): void => {
+    for (const stmt of sf.statements) {
+      if (!ts.isImportDeclaration(stmt)) continue;
+      const sym = checker.getSymbolAtLocation(stmt.moduleSpecifier);
+      const dep = sym?.declarations?.find(ts.isSourceFile);
+      if (!dep || seen.has(dep) || dep.isDeclarationFile || !hasUseVerifiedDirective(dep)) continue;
+      seen.add(dep);
+      out.push(dep);
+      visit(dep);
+    }
+  };
+  visit(root);
+  return out;
+}
+
 export async function verifyFiles(
   filePaths: ReadonlyArray<string>,
   options: VerifyOptions = {},
 ): Promise<VerifyReport> {
   const absPaths = filePaths.map((p) => path.resolve(p));
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const z3Path = options.z3Path ?? process.env["VSCRIPT_Z3"] ?? "z3";
+  const z3Path = options.z3Path ?? process.env["LAWSCRIPT_Z3"] ?? "z3";
   const requireDirective = options.requireDirective ?? true;
 
   const compilerOptions: ts.CompilerOptions = {
@@ -54,7 +73,7 @@ export async function verifyFiles(
         diagnostics: [
           {
             stage: "typecheck",
-            code: "VS000",
+            code: "LAW000",
             message: `File not found or unreadable: ${absPath}`,
           },
         ],
@@ -64,10 +83,11 @@ export async function verifyFiles(
     }
 
     // Stage 1: TypeScript strict typecheck
-    const tsDiags = [
-      ...program.getSyntacticDiagnostics(sf),
-      ...program.getSemanticDiagnostics(sf),
-    ];
+    // Imported `"use verified";` modules are part of the proof, so they are type-checked too.
+    const tsDiags = [sf, ...verifiedDeps(sf, checker)].flatMap((f) => [
+      ...program.getSyntacticDiagnostics(f),
+      ...program.getSemanticDiagnostics(f),
+    ]);
 
     const diagnostics: Diagnostic[] = tsDiags.map((d) => {
       const message = ts.flattenDiagnosticMessageText(d.messageText, "\n");
@@ -135,7 +155,7 @@ export async function verifyFiles(
         diagnostics: [
           {
             stage: "smt",
-            code: "VS090",
+            code: "LAW090",
             message: `SMT lowering failed: ${message}`,
             location: getLocation(sf, sf),
           },

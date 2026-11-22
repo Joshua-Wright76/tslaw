@@ -144,10 +144,50 @@ export function lowerModuleLaws(
     return res.type;
   };
 
-  const lowerExpr = (expr: ts.Expression, env: Map<string, string>): string => {
-    if (ts.isParenthesizedExpression(expr)) {
-      return lowerExpr(expr.expression, env);
+  const fnByDecl = new Map(functions.map((fn) => [fn.decl, fn]));
+
+  /**
+   * Convert an SMT value of record type `from` into record type `to` by dropping extra fields.
+   * TypeScript lets a record with extra fields flow anywhere a narrower record is expected
+   * (structural subtyping), but each record shape is a distinct SMT datatype.
+   */
+  const project = (smt: string, from: VType, to: VType): string => {
+    if (vTypeKey(from) === vTypeKey(to)) return smt;
+    if (from.kind !== "record" || to.kind !== "record") {
+      throw new Error(`Cannot convert ${vTypeKey(from)} to ${vTypeKey(to)}`);
     }
+    const fromDef = registry.getRecord(from);
+    const toDef = registry.getRecord(to);
+    const tmp = nextVar("proj");
+    const args = toDef.fields.map((tf) => {
+      const ff = fromDef.fields.find((f) => f.name === tf.name);
+      if (!ff) throw new Error(`Field \`${tf.name}\` missing when converting record types`);
+      return project(`(${ff.smtAccessor} ${tmp})`, ff.type, tf.type);
+    });
+    return `(let ((${tmp} ${smt})) (${toDef.ctorName} ${args.join(" ")}))`;
+  };
+
+  /**
+   * Lower an expression. When `expected` is given (call arguments, returns, annotated consts),
+   * the result is converted to that type if the expression's own type is a wider record.
+   */
+  const lowerExpr = (expr: ts.Expression, env: Map<string, string>, expected?: VType): string => {
+    if (ts.isParenthesizedExpression(expr)) {
+      return lowerExpr(expr.expression, env, expected);
+    }
+    if (ts.isConditionalExpression(expr)) {
+      const target = expected ?? resolveExprVType(expr);
+      const c = lowerExpr(expr.condition, env);
+      const t = lowerExpr(expr.whenTrue, env, target);
+      const f = lowerExpr(expr.whenFalse, env, target);
+      return `(ite ${c} ${t} ${f})`;
+    }
+    const smt = lowerExprRaw(expr, env);
+    if (!expected || expected.kind !== "record") return smt;
+    return project(smt, resolveExprVType(expr), expected);
+  };
+
+  const lowerExprRaw = (expr: ts.Expression, env: Map<string, string>): string => {
     if (ts.isBigIntLiteral(expr)) {
       return bigintLiteralToSmt(expr.text);
     }
@@ -194,12 +234,6 @@ export function lowerModuleLaws(
           return `(or ${left} ${right})`;
       }
     }
-    if (ts.isConditionalExpression(expr)) {
-      const c = lowerExpr(expr.condition, env);
-      const t = lowerExpr(expr.whenTrue, env);
-      const f = lowerExpr(expr.whenFalse, env);
-      return `(ite ${c} ${t} ${f})`;
-    }
     if (ts.isPropertyAccessExpression(expr)) {
       const recType = resolveExprVType(expr.expression);
       const recDef = registry.getRecord(recType);
@@ -231,11 +265,11 @@ export function lowerModuleLaws(
     }
     if (ts.isCallExpression(expr) && ts.isIdentifier(expr.expression)) {
       const fnName = expr.expression.text;
-      const args = expr.arguments.map((a) => lowerExpr(a, env));
       // Resolve the callee by symbol, never by name: a user function named `implies`, or two
       // modules each defining a private `helper`, must not be confused with one another.
       const callee = resolveCallee(checker, expr.expression);
       if (callee.kind === "runtime" && callee.helper === "implies") {
+        const args = expr.arguments.map((a) => lowerExpr(a, env));
         if (args.length !== 2) throw new Error("`implies` requires exactly 2 arguments");
         return `(=> ${args[0]} ${args[1]})`;
       }
@@ -243,9 +277,14 @@ export function lowerModuleLaws(
         throw new Error(`Cannot resolve callee \`${fnName}\` during SMT lowering`);
       }
       const target = fnSmtNames.get(callee.decl);
-      if (!target) {
+      const calleeFn = fnByDecl.get(callee.decl);
+      if (!target || !calleeFn) {
         throw new Error(`Callee \`${fnName}\` is not a known verified function`);
       }
+      if (expr.arguments.length !== calleeFn.params.length) {
+        throw new Error(`Wrong number of arguments in call to \`${fnName}\``);
+      }
+      const args = expr.arguments.map((a, i) => lowerExpr(a, env, calleeFn.params[i]!.type));
       return args.length > 0 ? `(${target} ${args.join(" ")})` : target;
     }
 
@@ -256,6 +295,7 @@ export function lowerModuleLaws(
     stmts: ReadonlyArray<ts.Statement>,
     idx: number,
     env: Map<string, string>,
+    ret: VType,
   ): string => {
     const stmt = stmts[idx];
     if (!stmt) {
@@ -264,23 +304,25 @@ export function lowerModuleLaws(
 
     if (ts.isReturnStatement(stmt)) {
       if (!stmt.expression) throw new Error("Bare return in SMT lowering");
-      return lowerExpr(stmt.expression, env);
+      return lowerExpr(stmt.expression, env, ret);
     }
 
     if (ts.isVariableStatement(stmt)) {
       const decls = stmt.declarationList.declarations;
       const lowerDeclAt = (dIdx: number, curEnv: Map<string, string>): string => {
         const decl = decls[dIdx];
-        if (!decl) return lowerStatements(stmts, idx + 1, curEnv);
+        if (!decl) return lowerStatements(stmts, idx + 1, curEnv, ret);
         if (!decl.initializer) throw new Error("Missing initializer");
-        const initSmt = lowerExpr(decl.initializer, curEnv);
 
         if (ts.isIdentifier(decl.name)) {
+          // An annotated const (`const a: Narrow = wide`) has the declared type, not the initializer's.
+          const initSmt = lowerExpr(decl.initializer, curEnv, resolveExprVType(decl.name));
           const v = nextVar(decl.name.text);
           const nextEnv = new Map(curEnv);
           nextEnv.set(decl.name.text, v);
           return `(let ((${v} ${initSmt})) ${lowerDeclAt(dIdx + 1, nextEnv)})`;
         }
+        const initSmt = lowerExpr(decl.initializer, curEnv);
         if (ts.isObjectBindingPattern(decl.name)) {
           const recType = resolveExprVType(decl.initializer);
           const recDef = registry.getRecord(recType);
@@ -307,17 +349,17 @@ export function lowerModuleLaws(
       const condSmt = lowerExpr(stmt.expression, env);
       const lowerBranch = (branch: ts.Statement): string => {
         if (ts.isBlock(branch)) {
-          return lowerStatements(branch.statements, 0, env);
+          return lowerStatements(branch.statements, 0, env, ret);
         }
         if (ts.isReturnStatement(branch) || ts.isIfStatement(branch)) {
-          return lowerStatements([branch], 0, env);
+          return lowerStatements([branch], 0, env, ret);
         }
         throw new Error(`Unsupported if branch: ${ts.SyntaxKind[branch.kind]}`);
       };
       const thenSmt = lowerBranch(stmt.thenStatement);
       const elseSmt = stmt.elseStatement
         ? lowerBranch(stmt.elseStatement)
-        : lowerStatements(stmts, idx + 1, env);
+        : lowerStatements(stmts, idx + 1, env, ret);
       return `(ite ${condSmt} ${thenSmt} ${elseSmt})`;
     }
 
@@ -327,11 +369,12 @@ export function lowerModuleLaws(
   const lowerBody = (
     body: ts.Block | ts.Expression,
     env: Map<string, string>,
+    ret: VType,
   ): string => {
     if (ts.isBlock(body)) {
-      return lowerStatements(body.statements, 0, env);
+      return lowerStatements(body.statements, 0, env, ret);
     }
-    return lowerExpr(body, env);
+    return lowerExpr(body, env, ret);
   };
 
   // Lower all functions first (which also discovers any inline record types used inside bodies).
@@ -344,7 +387,7 @@ export function lowerModuleLaws(
       return `(${smtName} ${registry.register(p.type)})`;
     });
     const retSort = registry.register(fn.returnType);
-    const bodySmt = lowerBody(fn.body, env);
+    const bodySmt = lowerBody(fn.body, env, fn.returnType);
     fnDefs.push(
       `(define-fun ${fnSmtNames.get(fn.decl)!} (${paramsSmt.join(" ")}) ${retSort}\n  ${bodySmt})`,
     );
@@ -358,7 +401,7 @@ export function lowerModuleLaws(
       env.set(p.name, smtName);
       return { tsName: p.name, smtName, type: p.type };
     });
-    const bodySmt = lowerBody(l.body, env);
+    const bodySmt = lowerBody(l.body, env, { kind: "boolean" });
     return { law: l, paramSmtNames, bodySmt };
   });
 
@@ -367,7 +410,7 @@ export function lowerModuleLaws(
 
   return loweredLawBodies.map(({ law, paramSmtNames, bodySmt }) => {
     const lines: string[] = [
-      `; vscript law: ${law.name}`,
+      `; lawscript law: ${law.name}`,
       "(set-option :produce-models true)",
       ...datatypeDecls,
       ...fnDefs,

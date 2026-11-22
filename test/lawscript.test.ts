@@ -8,7 +8,7 @@ import { buggyTransfer } from "../examples/buggy.law.js";
 const tmpDirs: string[] = [];
 
 function writeTempLawFile(filename: string, body: string): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vscript-test-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lawscript-test-"));
   tmpDirs.push(dir);
   const runtimePath = path.resolve("src/runtime.ts").replace(/\.ts$/, ".js");
   const content = body.replaceAll("RUNTIME_PATH", runtimePath);
@@ -24,7 +24,7 @@ afterEach(() => {
   }
 });
 
-describe("vscript formal verifier", () => {
+describe("lawscript formal verifier", () => {
   it("proves all laws in examples/tokens.law.ts and examples/bank.law.ts", async () => {
     const report = await verifyFiles([
       "examples/tokens.law.ts",
@@ -68,10 +68,10 @@ describe("vscript formal verifier", () => {
     expect(report.summary.errors).toBeGreaterThan(0);
 
     const codes = new Set(report.files[0]!.diagnostics.map((d) => d.code));
-    expect(codes.has("VS006")).toBe(true); // number param
-    expect(codes.has("VS022")).toBe(true); // let mutation
-    expect(codes.has("VS026")).toBe(true); // while loop
-    expect(codes.has("VS019")).toBe(true); // as cast
+    expect(codes.has("LAW006")).toBe(true); // number param
+    expect(codes.has("LAW022")).toBe(true); // let mutation
+    expect(codes.has("LAW026")).toBe(true); // while loop
+    expect(codes.has("LAW019")).toBe(true); // as cast
   });
 
   it("skips files without 'use verified' directive by default", async () => {
@@ -100,8 +100,8 @@ law("t", (a: Box, b: Box) => eqBox(a, b));
     const report = await verifyFiles([file]);
     expect(report.ok).toBe(false);
     const codes = report.files[0]!.diagnostics.map((d) => d.code);
-    expect(codes).toContain("VS004"); // mutable field on return type
-    expect(codes).toContain("VS015"); // record === record
+    expect(codes).toContain("LAW004"); // mutable field on return type
+    expect(codes).toContain("LAW015"); // record === record
   });
 
   it("rejects recursive functions to guarantee termination", async () => {
@@ -119,7 +119,7 @@ law("pos", (n: bigint) => fact(n) >= 1n);
     const report = await verifyFiles([file]);
     expect(report.ok).toBe(false);
     const codes = report.files[0]!.diagnostics.map((d) => d.code);
-    expect(codes).toContain("VS032");
+    expect(codes).toContain("LAW032");
   });
 
   it("supports const destructuring, nested records, and counterexamples on records", async () => {
@@ -151,8 +151,24 @@ law("swap preserves order (false!)", (p: Pair) => {
     expect(raw.a).not.toBe(raw.b);
   });
 
+  it("rejects type-check suppression comments in verified modules", async () => {
+    const report = await verifyFiles(["test/fixtures/dialect/ts-ignore.law.ts"]);
+    expect(report.ok).toBe(false);
+    expect(report.summary.proved).toBe(0);
+    expect(report.files[0]!.diagnostics.map((d) => d.code)).toContain("LAW033");
+  });
+
+  it("type-checks imported 'use verified' modules, not just the named file", async () => {
+    const report = await verifyFiles(["test/fixtures/dialect/imports-type-error.law.ts"]);
+    expect(report.ok).toBe(false);
+    expect(report.summary.proved).toBe(0);
+    const diag = report.files[0]!.diagnostics.find((d) => d.code === "TS2304")!;
+    expect(diag).toBeDefined();
+    expect(diag.location!.file).toMatch(/dep-type-error\.ts$/);
+  });
+
   it("supports importing pure functions from another 'use verified' module", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vscript-xfile-"));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lawscript-xfile-"));
     tmpDirs.push(dir);
     const runtimePath = path.resolve("src/runtime.ts").replace(/\.ts$/, ".js");
     fs.writeFileSync(

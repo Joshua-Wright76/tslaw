@@ -159,6 +159,22 @@ export async function runZ3(
         .filter((l) => l.length > 0);
       const verdict = lines[0];
 
+      // Z3 keeps going after an error and prints a meaningless verdict afterwards, so an
+      // error before the verdict means the generated SMT was rejected.
+      if (verdict?.startsWith("(error")) {
+        const messages: string[] = [];
+        for (const l of lines) {
+          if (!l.startsWith("(error")) break;
+          messages.push(/^\(error "(.*)"\)$/.exec(l)?.[1] ?? l);
+        }
+        finish({
+          status: "error",
+          durationMs,
+          reason: `Z3 rejected the generated SMT-LIB2 (this is a bug in the verifier, please report it): ${messages.join("; ")}`.slice(0, 600),
+        });
+        return;
+      }
+
       if (verdict === "unsat") {
         finish({ status: "proved", durationMs });
         return;

@@ -37,7 +37,7 @@ export interface DialectAnalysis {
 // ---------------------------------------------------------------------------
 // Runtime identification
 //
-// `law` and `implies` get special SMT semantics, so they must be the *real* vscript runtime
+// `law` and `implies` get special SMT semantics, so they must be the *real* lawscript runtime
 // helpers — not any function that happens to share the name. A user-defined
 // `implies = (a, b) => a && b` lowered as SMT `=>` would let false laws be PROVED.
 // ---------------------------------------------------------------------------
@@ -73,11 +73,11 @@ const BUNDLED_RUNTIME_FILES = new Set(
 const runtimeFileCache = new Map<string, boolean>();
 
 /**
- * True if `fileName` is the vscript runtime module: either this installation's own copy, or
+ * True if `fileName` is the lawscript runtime module: either this installation's own copy, or
  * the runtime of an installed package with the same name (e.g. a project-local install checked
  * by a globally installed CLI).
  */
-export function isVscriptRuntimeFile(fileName: string): boolean {
+export function isLawscriptRuntimeFile(fileName: string): boolean {
   const cached = runtimeFileCache.get(fileName);
   if (cached !== undefined) return cached;
 
@@ -127,7 +127,7 @@ export function resolveCallee(checker: ts.TypeChecker, ident: ts.Identifier): Ca
   const name = decl.name.text;
   if (
     (name === "law" || name === "implies") &&
-    isVscriptRuntimeFile(decl.getSourceFile().fileName)
+    isLawscriptRuntimeFile(decl.getSourceFile().fileName)
   ) {
     return { kind: "runtime", helper: name };
   }
@@ -170,7 +170,7 @@ export function vTypesEqual(a: VType, b: VType): boolean {
 }
 
 /**
- * Convert a resolved TypeScript type into a supported vscript VType.
+ * Convert a resolved TypeScript type into a supported lawscript VType.
  */
 export function resolveVType(
   checker: ts.TypeChecker,
@@ -214,7 +214,7 @@ export function resolveVType(
     }
     return {
       ok: false,
-      reason: `union type \`${checker.typeToString(type)}\` is not supported in vscript v0.1`,
+      reason: `union type \`${checker.typeToString(type)}\` is not supported in lawscript v0.1`,
     };
   }
 
@@ -225,7 +225,7 @@ export function resolveVType(
     if (checker.isArrayType(type) || checker.isTupleType(type)) {
       return {
         ok: false,
-        reason: `array/tuple type \`${checker.typeToString(type)}\` is not supported in vscript v0.1`,
+        reason: `array/tuple type \`${checker.typeToString(type)}\` is not supported in lawscript v0.1`,
       };
     }
     if (type.getCallSignatures().length > 0) {
@@ -276,7 +276,7 @@ export function resolveVType(
 }
 
 /**
- * Analyze a TypeScript source file against the vscript sound pure subset.
+ * Analyze a TypeScript source file against the lawscript sound pure subset.
  */
 export function analyzeDialect(
   sf: ts.SourceFile,
@@ -309,6 +309,28 @@ export function analyzeDialect(
     });
   };
 
+  // Type-check suppression comments would let ill-typed code past Stage 1, and every later
+  // stage assumes the code is well-typed.
+  const scanner = ts.createScanner(ts.ScriptTarget.ES2022, false, ts.LanguageVariant.Standard, sf.text);
+  for (let tok = scanner.scan(); tok !== ts.SyntaxKind.EndOfFileToken; tok = scanner.scan()) {
+    if (
+      tok !== ts.SyntaxKind.SingleLineCommentTrivia &&
+      tok !== ts.SyntaxKind.MultiLineCommentTrivia
+    ) {
+      continue;
+    }
+    const m = /@ts-(ignore|expect-error|nocheck)\b/.exec(scanner.getTokenText());
+    if (m) {
+      const { line, character } = sf.getLineAndCharacterOfPosition(scanner.getTokenStart());
+      diagnostics.push({
+        stage: "dialect",
+        code: "LAW033",
+        message: `\`@ts-${m[1]}\` is forbidden in verified modules (it hides type errors the proof relies on)`,
+        location: { file: sf.fileName, line: line + 1, column: character + 1 },
+      });
+    }
+  }
+
   // Track cross-file `"use verified";` imports. Runtime helpers (`law`, `implies`) and
   // verified functions are identified by resolving symbols, never by name.
   const importedFunctions = new Map<ts.FunctionDeclaration, VerifiedFunction>();
@@ -317,11 +339,11 @@ export function analyzeDialect(
     if (!ts.isImportDeclaration(stmt) || !stmt.importClause) continue;
     if (stmt.importClause.isTypeOnly) continue;
     if (!stmt.importClause.namedBindings) {
-      addError("VS001", "Default imports are not allowed in verified modules", stmt);
+      addError("LAW001", "Default imports are not allowed in verified modules", stmt);
       continue;
     }
     if (!ts.isNamedImports(stmt.importClause.namedBindings)) {
-      addError("VS001", "Namespace imports are not allowed in verified modules", stmt);
+      addError("LAW001", "Namespace imports are not allowed in verified modules", stmt);
       continue;
     }
     for (const elem of stmt.importClause.namedBindings.elements) {
@@ -343,15 +365,15 @@ export function analyzeDialect(
         const depSf = callee.decl.getSourceFile();
         if ((orig === "law" || orig === "implies") && !hasUseVerifiedDirective(depSf)) {
           addError(
-            "VS001",
-            `\`${orig}\` must be imported from the vscript runtime (found a different \`${orig}\` in ${depSf.fileName})`,
+            "LAW001",
+            `\`${orig}\` must be imported from the lawscript runtime (found a different \`${orig}\` in ${depSf.fileName})`,
             elem,
           );
           continue;
         }
         if (!hasUseVerifiedDirective(depSf)) {
           addError(
-            "VS001",
+            "LAW001",
             `Imported function \`${orig}\` is from an unverified module (add \`"use verified";\` to ${depSf.fileName})`,
             elem,
           );
@@ -368,7 +390,7 @@ export function analyzeDialect(
         continue;
       }
       addError(
-        "VS001",
+        "LAW001",
         `Verified modules may only import \`law\`, \`implies\`, types, or functions from other \`"use verified";\` modules (found \`${orig}\`)`,
         elem,
       );
@@ -394,7 +416,7 @@ export function analyzeDialect(
       }
       if (ts.isNumericLiteral(expr)) {
         addError(
-          "VS010",
+          "LAW010",
           `Numeric literal \`${expr.text}\` is a float; use a bigint literal like \`${expr.text}n\``,
           expr,
         );
@@ -403,7 +425,7 @@ export function analyzeDialect(
       if (ts.isIdentifier(expr)) {
         if (!scope.has(expr.text)) {
           addError(
-            "VS011",
+            "LAW011",
             `Identifier \`${expr.text}\` is not a local parameter or const binding (globals are forbidden)`,
             expr,
           );
@@ -416,14 +438,14 @@ export function analyzeDialect(
           expr.operator !== ts.SyntaxKind.ExclamationToken &&
           expr.operator !== ts.SyntaxKind.PlusToken
         ) {
-          addError("VS012", "Mutating unary operators (`++`, `--`, `~`) are forbidden", expr);
+          addError("LAW012", "Mutating unary operators (`++`, `--`, `~`) are forbidden", expr);
           return;
         }
         checkExpr(expr.operand, scope);
         return;
       }
       if (ts.isPostfixUnaryExpression(expr)) {
-        addError("VS012", "Mutating postfix operators (`++`, `--`) are forbidden", expr);
+        addError("LAW012", "Mutating postfix operators (`++`, `--`) are forbidden", expr);
         return;
       }
       if (ts.isBinaryExpression(expr)) {
@@ -443,15 +465,15 @@ export function analyzeDialect(
         ]);
         if (op === ts.SyntaxKind.SlashToken || op === ts.SyntaxKind.PercentToken) {
           addError(
-            "VS013",
-            "Division `/` and modulo `%` are not yet supported in vscript v0.1 (JS truncating semantics differ from SMT Euclidean div)",
+            "LAW013",
+            "Division `/` and modulo `%` are not yet supported in lawscript v0.1 (JS truncating semantics differ from SMT Euclidean div)",
             expr.operatorToken,
           );
           return;
         }
         if (!allowed.has(op)) {
           addError(
-            "VS014",
+            "LAW014",
             `Operator \`${expr.operatorToken.getText(sf)}\` is forbidden in verified modules`,
             expr.operatorToken,
           );
@@ -468,7 +490,7 @@ export function analyzeDialect(
             (rt.ok && rt.type.kind === "record")
           ) {
             addError(
-              "VS015",
+              "LAW015",
               "Direct `===`/`!==` on records is forbidden (JS compares object identity, not structure); compare fields explicitly",
               expr,
             );
@@ -489,7 +511,7 @@ export function analyzeDialect(
         const objType = resolveVType(checker, checker.getTypeAtLocation(expr.expression));
         if (!objType.ok || objType.type.kind !== "record") {
           addError(
-            "VS016",
+            "LAW016",
             "Property access is only allowed on verified `readonly` records",
             expr,
           );
@@ -500,7 +522,7 @@ export function analyzeDialect(
         for (const prop of expr.properties) {
           if (ts.isPropertyAssignment(prop)) {
             if (!ts.isIdentifier(prop.name)) {
-              addError("VS017", "Computed or non-identifier record keys are forbidden", prop.name);
+              addError("LAW017", "Computed or non-identifier record keys are forbidden", prop.name);
               continue;
             }
             checkExpr(prop.initializer, scope);
@@ -508,7 +530,7 @@ export function analyzeDialect(
             checkExpr(prop.name, scope);
           } else {
             addError(
-              "VS017",
+              "LAW017",
               "Object spread, getters, setters, and methods are forbidden in verified records",
               prop,
             );
@@ -518,14 +540,14 @@ export function analyzeDialect(
       }
       if (ts.isCallExpression(expr)) {
         if (!ts.isIdentifier(expr.expression)) {
-          addError("VS018", "Only direct calls to verified functions or `implies` are allowed", expr);
+          addError("LAW018", "Only direct calls to verified functions or `implies` are allowed", expr);
           return;
         }
         const fnName = expr.expression.text;
         const callee = resolveCallee(checker, expr.expression);
         if (callee.kind === "runtime" && callee.helper === "implies") {
           if (expr.arguments.length !== 2) {
-            addError("VS018", "`implies` requires exactly 2 arguments", expr);
+            addError("LAW018", "`implies` requires exactly 2 arguments", expr);
           }
           for (const arg of expr.arguments) checkExpr(arg, scope);
           return;
@@ -538,7 +560,7 @@ export function analyzeDialect(
           (calleeSf === sf || analyzedDeps.has(calleeSf.fileName));
         if (!isVerifiedCallee) {
           addError(
-            "VS018",
+            "LAW018",
             `Call to unverified function \`${fnName}\` is forbidden inside verified modules`,
             expr,
           );
@@ -553,11 +575,11 @@ export function analyzeDialect(
         ts.isTypeAssertionExpression(expr) ||
         ts.isNonNullExpression(expr)
       ) {
-        addError("VS019", "Type assertions (`as`, `!`) are forbidden in verified modules", expr);
+        addError("LAW019", "Type assertions (`as`, `!`) are forbidden in verified modules", expr);
         return;
       }
       addError(
-        "VS020",
+        "LAW020",
         `Expression kind \`${ts.SyntaxKind[expr.kind]}\` is not allowed in verified modules`,
         expr,
       );
@@ -569,44 +591,44 @@ export function analyzeDialect(
 
       for (const stmt of block.statements) {
         if (terminated) {
-          addError("VS021", "Unreachable statement after `return`", stmt);
+          addError("LAW021", "Unreachable statement after `return`", stmt);
           break;
         }
         if (ts.isVariableStatement(stmt)) {
           const isConst = (stmt.declarationList.flags & ts.NodeFlags.Const) !== 0;
           if (!isConst) {
-            addError("VS022", "Mutable bindings (`let`/`var`) are forbidden; use `const`", stmt);
+            addError("LAW022", "Mutable bindings (`let`/`var`) are forbidden; use `const`", stmt);
             continue;
           }
           for (const decl of stmt.declarationList.declarations) {
             if (!decl.initializer) {
-              addError("VS022", "`const` declarations must have an initializer", decl);
+              addError("LAW022", "`const` declarations must have an initializer", decl);
               continue;
             }
             checkExpr(decl.initializer, scope);
             const initType = resolveVType(checker, checker.getTypeAtLocation(decl.initializer));
             if (!initType.ok) {
-              addError("VS023", `Invalid local type: ${initType.reason}`, decl);
+              addError("LAW023", `Invalid local type: ${initType.reason}`, decl);
             }
             if (ts.isIdentifier(decl.name)) {
               scope.add(decl.name.text);
             } else if (ts.isObjectBindingPattern(decl.name)) {
               for (const el of decl.name.elements) {
                 if (el.dotDotDotToken || el.initializer || !ts.isIdentifier(el.name)) {
-                  addError("VS022", "Rest/default/nested destructuring is not supported", el);
+                  addError("LAW022", "Rest/default/nested destructuring is not supported", el);
                   continue;
                 }
                 scope.add(el.name.text);
               }
             } else {
-              addError("VS022", "Unsupported binding pattern", decl.name);
+              addError("LAW022", "Unsupported binding pattern", decl.name);
             }
           }
           continue;
         }
         if (ts.isReturnStatement(stmt)) {
           if (!stmt.expression) {
-            addError("VS024", "Bare `return;` is forbidden; verified functions must return a value", stmt);
+            addError("LAW024", "Bare `return;` is forbidden; verified functions must return a value", stmt);
           } else {
             checkExpr(stmt.expression, scope);
           }
@@ -619,7 +641,7 @@ export function analyzeDialect(
             if (ts.isBlock(branch)) return checkBlock(branch, scope);
             if (ts.isReturnStatement(branch)) {
               if (!branch.expression) {
-                addError("VS024", "Bare `return;` is forbidden", branch);
+                addError("LAW024", "Bare `return;` is forbidden", branch);
               } else {
                 checkExpr(branch.expression, scope);
               }
@@ -630,7 +652,7 @@ export function analyzeDialect(
               return checkBlock(synthetic, scope);
             }
             addError(
-              "VS025",
+              "LAW025",
               "Only blocks, `return`, or `else if` are allowed as `if` branches",
               branch,
             );
@@ -643,14 +665,14 @@ export function analyzeDialect(
               terminated = true;
             } else if (!thenReturns || !elseReturns) {
               addError(
-                "VS025",
+                "LAW025",
                 "Both branches of an `if`/`else` must return in verified modules",
                 stmt,
               );
             }
           } else if (!thenReturns) {
             addError(
-              "VS025",
+              "LAW025",
               "An `if` without `else` must end with `return` (guard clause)",
               stmt,
             );
@@ -664,15 +686,15 @@ export function analyzeDialect(
           ts.isForInStatement(stmt) ||
           ts.isForOfStatement(stmt)
         ) {
-          addError("VS026", "Loops are forbidden in verified modules (unbounded termination)", stmt);
+          addError("LAW026", "Loops are forbidden in verified modules (unbounded termination)", stmt);
           continue;
         }
         if (ts.isThrowStatement(stmt) || ts.isTryStatement(stmt)) {
-          addError("VS027", "Exceptions (`throw`/`try`) are forbidden in verified modules", stmt);
+          addError("LAW027", "Exceptions (`throw`/`try`) are forbidden in verified modules", stmt);
           continue;
         }
         addError(
-          "VS028",
+          "LAW028",
           `Statement kind \`${ts.SyntaxKind[stmt.kind]}\` is not allowed in verified modules`,
           stmt,
         );
@@ -684,7 +706,7 @@ export function analyzeDialect(
     if (ts.isBlock(body)) {
       const returns = checkBlock(body, localNames);
       if (!returns) {
-        addError("VS029", "Verified function/law block must return on every code path", body);
+        addError("LAW029", "Verified function/law block must return on every code path", body);
       }
     } else {
       checkExpr(body, localNames);
@@ -697,20 +719,20 @@ export function analyzeDialect(
     const out: VerifiedParam[] = [];
     for (const p of params) {
       if (p.dotDotDotToken || p.questionToken || p.initializer) {
-        addError("VS005", "Optional, rest, and default parameters are forbidden", p);
+        addError("LAW005", "Optional, rest, and default parameters are forbidden", p);
         continue;
       }
       if (!ts.isIdentifier(p.name)) {
-        addError("VS005", "Destructured parameters are not supported; name parameters directly", p);
+        addError("LAW005", "Destructured parameters are not supported; name parameters directly", p);
         continue;
       }
       if (!p.type) {
-        addError("VS005", `Parameter \`${p.name.text}\` must have an explicit type annotation`, p);
+        addError("LAW005", `Parameter \`${p.name.text}\` must have an explicit type annotation`, p);
         continue;
       }
       const resolved = resolveVType(checker, checker.getTypeAtLocation(p));
       if (!resolved.ok) {
-        addError("VS006", `Parameter \`${p.name.text}\`: ${resolved.reason}`, p);
+        addError("LAW006", `Parameter \`${p.name.text}\`: ${resolved.reason}`, p);
         continue;
       }
       out.push({ name: p.name.text, type: resolved.type });
@@ -731,32 +753,32 @@ export function analyzeDialect(
 
     if (ts.isFunctionDeclaration(stmt)) {
       if (!stmt.name) {
-        addError("VS002", "Anonymous top-level functions are not allowed", stmt);
+        addError("LAW002", "Anonymous top-level functions are not allowed", stmt);
         continue;
       }
       if (stmt.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)) {
-        addError("VS003", "`async` functions are forbidden in verified modules", stmt);
+        addError("LAW003", "`async` functions are forbidden in verified modules", stmt);
         continue;
       }
       if (stmt.asteriskToken) {
-        addError("VS003", "Generator functions are forbidden in verified modules", stmt);
+        addError("LAW003", "Generator functions are forbidden in verified modules", stmt);
         continue;
       }
       if (stmt.typeParameters && stmt.typeParameters.length > 0) {
-        addError("VS003", "Generic type parameters are not supported in vscript v0.1", stmt);
+        addError("LAW003", "Generic type parameters are not supported in lawscript v0.1", stmt);
         continue;
       }
       if (!stmt.body) {
-        addError("VS003", "Ambient function declarations without a body are forbidden", stmt);
+        addError("LAW003", "Ambient function declarations without a body are forbidden", stmt);
         continue;
       }
       if (!stmt.type) {
-        addError("VS004", `Function \`${stmt.name.text}\` must have an explicit return type`, stmt);
+        addError("LAW004", `Function \`${stmt.name.text}\` must have an explicit return type`, stmt);
         continue;
       }
       const retResolved = resolveVType(checker, checker.getTypeFromTypeNode(stmt.type));
       if (!retResolved.ok) {
-        addError("VS004", `Function \`${stmt.name.text}\` return type: ${retResolved.reason}`, stmt.type);
+        addError("LAW004", `Function \`${stmt.name.text}\` return type: ${retResolved.reason}`, stmt.type);
         continue;
       }
       const params = checkParams(stmt.parameters);
@@ -785,20 +807,20 @@ export function analyzeDialect(
     ) {
       const args = stmt.expression.arguments;
       if (args.length !== 2) {
-        addError("VS030", "`law(name, predicate)` requires exactly 2 arguments", stmt);
+        addError("LAW030", "`law(name, predicate)` requires exactly 2 arguments", stmt);
         continue;
       }
       const [nameArg, fnArg] = args;
       if (!nameArg || !ts.isStringLiteral(nameArg)) {
-        addError("VS030", "First argument to `law` must be a string literal", nameArg ?? stmt);
+        addError("LAW030", "First argument to `law` must be a string literal", nameArg ?? stmt);
         continue;
       }
       if (!fnArg || (!ts.isArrowFunction(fnArg) && !ts.isFunctionExpression(fnArg))) {
-        addError("VS030", "Second argument to `law` must be an arrow or function expression", fnArg ?? stmt);
+        addError("LAW030", "Second argument to `law` must be an arrow or function expression", fnArg ?? stmt);
         continue;
       }
       if (fnArg.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)) {
-        addError("VS030", "`law` predicates cannot be async", fnArg);
+        addError("LAW030", "`law` predicates cannot be async", fnArg);
         continue;
       }
       const params = checkParams(fnArg.parameters);
@@ -814,7 +836,7 @@ export function analyzeDialect(
     }
 
     addError(
-      "VS031",
+      "LAW031",
       `Top-level \`${ts.SyntaxKind[stmt.kind]}\` is not allowed in verified modules (use type/interface, pure function declarations, and \`law(...)\`)`,
       stmt,
     );
@@ -837,8 +859,8 @@ export function analyzeDialect(
         const cycle = [...stack.slice(stack.indexOf(callee)), callee].map(fnName).join(" -> ");
         diagnostics.push({
           stage: "dialect",
-          code: "VS032",
-          message: `Recursion is not supported in vscript v0.1 (cycle: ${cycle})`,
+          code: "LAW032",
+          message: `Recursion is not supported in lawscript v0.1 (cycle: ${cycle})`,
           location: fn.location,
         });
       } else if (c === 0) {

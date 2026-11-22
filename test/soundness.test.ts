@@ -123,12 +123,12 @@ describe("soundness: fixtures that once produced false PROVED verdicts", () => {
     expect(laws.length).toBeGreaterThan(0);
   });
 
-  it("rejects `implies` imported from a module that is not the vscript runtime", async () => {
+  it("rejects `implies` imported from a module that is not the lawscript runtime", async () => {
     const report = await verifyFiles([path.join(FIXTURE_DIR, "fake-implies-unverified.law.ts")]);
     expect(report.ok).toBe(false);
     expect(report.summary.proved).toBe(0);
     const codes = report.files[0]!.diagnostics.map((d) => d.code);
-    expect(codes).toContain("VS001");
+    expect(codes).toContain("LAW001");
   });
 });
 

@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install Z3
+        run: sudo apt-get update && sudo apt-get install -y z3 && z3 --version
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - name: Check the examples with the built CLI
+        run: node dist/cli.js check examples/tokens.law.ts examples/bank.law.ts
