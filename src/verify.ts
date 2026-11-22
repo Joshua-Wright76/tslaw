@@ -145,25 +145,35 @@ export async function verifyFiles(
       continue;
     }
 
-    const lawResults: LawResult[] = [];
-    for (const lowered of loweredLaws) {
-      const z3Res = await runZ3(lowered, { timeoutMs, z3Path });
-      if (z3Res.status === "proved") proved++;
-      else if (z3Res.status === "disproved") disproved++;
-      else if (z3Res.status === "unknown") unknown++;
-      else errors++;
+    const concurrency = Math.max(1, options.concurrency ?? 8);
+    const lawResults: LawResult[] = new Array<LawResult>(loweredLaws.length);
+    let nextIdx = 0;
 
-      lawResults.push({
-        file: absPath,
-        name: lowered.law.name,
-        location: lowered.law.location,
-        status: z3Res.status,
-        durationMs: z3Res.durationMs,
-        ...(z3Res.counterexample ? { counterexample: z3Res.counterexample } : {}),
-        ...(options.emitSmt ? { smt: lowered.smtScript } : {}),
-        ...(z3Res.reason ? { reason: z3Res.reason } : {}),
-      });
-    }
+    const worker = async (): Promise<void> => {
+      while (nextIdx < loweredLaws.length) {
+        const idx = nextIdx++;
+        const lowered = loweredLaws[idx]!;
+        const z3Res = await runZ3(lowered, { timeoutMs, z3Path });
+        if (z3Res.status === "proved") proved++;
+        else if (z3Res.status === "disproved") disproved++;
+        else if (z3Res.status === "unknown") unknown++;
+        else errors++;
+
+        lawResults[idx] = {
+          file: absPath,
+          name: lowered.law.name,
+          location: lowered.law.location,
+          status: z3Res.status,
+          durationMs: z3Res.durationMs,
+          ...(z3Res.counterexample ? { counterexample: z3Res.counterexample } : {}),
+          ...(options.emitSmt ? { smt: lowered.smtScript } : {}),
+          ...(z3Res.reason ? { reason: z3Res.reason } : {}),
+        };
+      }
+    };
+
+    const workerCount = Math.min(concurrency, loweredLaws.length);
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
     fileResults.push({
       file: absPath,

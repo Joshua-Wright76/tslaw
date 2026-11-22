@@ -55,6 +55,8 @@ export interface VerifyOptions {
   readonly z3Path?: string;
   /** Verify files even without a top-level "use verified" directive. */
   readonly requireDirective?: boolean;
+  /** Maximum concurrent Z3 solver processes (default: 8). */
+  readonly concurrency?: number;
 }
 
 export interface VerifyReport {
