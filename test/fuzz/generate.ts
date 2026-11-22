@@ -5,20 +5,22 @@
  * translation supports: bigint/boolean arithmetic and logic, records (including passing a
  * wider record where a narrower one is expected), `const` and destructuring, guard clauses,
  * `if`/`else`, ternaries, `implies`, calls between functions, recursion, and `let` variables
- * with assignments and `while` loops.
+ * with assignments and `while` loops, and arrays.
  *
  * `test/fuzz.test.ts` runs each generated function on concrete inputs in real JavaScript and
  * then requires the prover to agree with the result.
  */
 
-export type TypeName = "bigint" | "boolean" | "N" | "W" | "O";
+export type TypeName = "bigint" | "boolean" | "N" | "W" | "O" | "A" | "AN";
 
 export const TYPE_DECLS = `export type N = { readonly a: bigint };
 export type W = { readonly a: bigint; readonly b: boolean };
 export type O = { readonly n: N; readonly w: W; readonly k: bigint };
+export type A = readonly bigint[];
+export type AN = readonly N[];
 `;
 
-const ALL_TYPES: TypeName[] = ["bigint", "boolean", "N", "W", "O"];
+const ALL_TYPES: TypeName[] = ["bigint", "boolean", "N", "W", "O", "A", "AN"];
 
 export interface Param {
   readonly name: string;
@@ -84,6 +86,13 @@ function atoms(ctx: Ctx, type: TypeName): string[] {
       if (v.type === "O") out.push(`${v.name}.n`, `${v.name}.w`);
     }
     if (type === "W" && v.type === "O") out.push(`${v.name}.w`);
+    // Array reads are always guarded, so every index is provably in range.
+    if (type === "bigint") {
+      // `len(x) < (...)` would be parsed as the start of a type-argument list.
+      if (v.type === "A") out.push(`(len(${v.name}))`, `(len(${v.name}) > 1n ? at(${v.name}, 1n) : 7n)`);
+      if (v.type === "AN") out.push(`(len(${v.name}))`, `(len(${v.name}) > 0n ? at(${v.name}, 0n).a : 3n)`);
+    }
+    if (type === "N" && v.type === "AN") out.push(`(len(${v.name}) > 1n ? at(${v.name}, 1n) : { a: 1n })`);
   }
   return out;
 }
@@ -100,7 +109,13 @@ function comparison(ctx: Ctx, depth: number): string {
   const op = pick(ctx.rng, ["<", "<=", ">", ">=", "===", "!=="]);
   // `===` between two literal types is a TypeScript error, so the left side is never a literal.
   const left = op === "===" || op === "!==" ? expr(ctx, "bigint", depth - 1, true) : expr(ctx, "bigint", depth - 1);
-  return `(${left} ${op} ${expr(ctx, "bigint", depth - 1)})`;
+  const right = expr(ctx, "bigint", depth - 1);
+  // TypeScript reads `a < (1n > (b) ...` as the start of a generic call `a<...>(b)`, so a
+  // `<` whose right side contains a `>` is written the other way round.
+  if ((op === "<" || op === "<=") && right.includes(">")) {
+    return `(${right} ${op === "<" ? ">" : ">="} ${left})`;
+  }
+  return `(${left} ${op} ${right})`;
 }
 
 /**
@@ -124,6 +139,10 @@ export function expr(ctx: Ctx, type: TypeName, depth: number, noLiteral = false)
         return `{ a: ${expr(ctx, "bigint", 0)}, b: ${expr(ctx, "boolean", 0)} }`;
       case "O":
         return `{ n: ${expr(ctx, "N", 0)}, w: ${expr(ctx, "W", 0)}, k: ${expr(ctx, "bigint", 0)} }`;
+      case "A":
+        return `[${Array.from({ length: Math.floor(rng() * 3) }, () => expr(ctx, "bigint", 0)).join(", ")}]`;
+      case "AN":
+        return `[${Array.from({ length: Math.floor(rng() * 3) }, () => expr(ctx, "N", 0)).join(", ")}]`;
     }
   };
   if (depth <= 0) return leaf();
@@ -159,6 +178,18 @@ export function expr(ctx: Ctx, type: TypeName, depth: number, noLiteral = false)
       return `{ a: ${expr(ctx, "bigint", depth - 1)}, b: ${expr(ctx, "boolean", depth - 1)} }`;
     case "O":
       return `{ n: ${expr(ctx, "N", depth - 1)}, w: ${expr(ctx, "W", depth - 1)}, k: ${expr(ctx, "bigint", depth - 1)} }`;
+    case "A":
+    case "AN": {
+      // The array a helper works on is always a variable, so its element type is known.
+      const vars = ctx.env.filter((v) => v.type === type).map((v) => v.name);
+      if (vars.length === 0) return leaf();
+      const xs = pick(rng, vars);
+      const element = type === "A" ? "bigint" : "N";
+      if (r < 0.6) return `append(${xs}, ${expr(ctx, element, depth - 1)})`;
+      if (r < 0.75) return `concat(${xs}, ${expr(ctx, type, depth - 1)})`;
+      if (r < 0.88) return `(len(${xs}) >= 2n ? slice(${xs}, 1n, len(${xs})) : ${xs})`;
+      return `(len(${xs}) > 0n ? withAt(${xs}, len(${xs}) - 1n, ${expr(ctx, element, depth - 1)}) : ${xs})`;
+    }
   }
 }
 
@@ -326,7 +357,7 @@ export function generateFunctions(seed: number, count: number, prefix: string): 
 // Concrete values
 // ---------------------------------------------------------------------------
 
-export type Value = bigint | boolean | { readonly [k: string]: Value };
+export type Value = bigint | boolean | ReadonlyArray<Value> | { readonly [k: string]: Value };
 
 export function randomValue(rng: Rng, type: TypeName): Value {
   switch (type) {
@@ -345,36 +376,48 @@ export function randomValue(rng: Rng, type: TypeName): Value {
       return { a: randomValue(rng, "bigint"), b: randomValue(rng, "boolean") };
     case "O":
       return { n: randomValue(rng, "N"), w: randomValue(rng, "W"), k: randomValue(rng, "bigint") };
+    case "A":
+      return Array.from({ length: Math.floor(rng() * 4) }, () => randomValue(rng, "bigint"));
+    case "AN":
+      return Array.from({ length: Math.floor(rng() * 4) }, () => randomValue(rng, "N"));
   }
 }
 
 export function valueToTs(v: Value): string {
   if (typeof v === "bigint") return `${v}n`;
   if (typeof v === "boolean") return String(v);
+  if (Array.isArray(v)) return `[${(v as ReadonlyArray<Value>).map(valueToTs).join(", ")}]`;
   return `{ ${Object.entries(v).map(([k, x]) => `${k}: ${valueToTs(x)}`).join(", ")} }`;
 }
 
-/** Field paths to every primitive inside a value of `type` (`""` for a primitive itself). */
-export function leafPaths(type: TypeName): string[] {
-  switch (type) {
-    case "bigint":
-    case "boolean":
-      return [""];
-    case "N":
-      return [".a"];
-    case "W":
-      return [".a", ".b"];
-    case "O":
-      return [".n.a", ".w.a", ".w.b", ".k"];
-  }
-}
+const FIELDS: Record<"N" | "W" | "O", ReadonlyArray<[string, TypeName]>> = {
+  N: [["a", "bigint"]],
+  W: [["a", "bigint"], ["b", "boolean"]],
+  O: [["n", "N"], ["w", "W"], ["k", "bigint"]],
+};
 
-export function readPath(v: Value, path: string): bigint | boolean {
-  let cur: Value = v;
-  for (const key of path.split(".").filter(Boolean)) {
-    if (typeof cur !== "object") throw new Error(`bad path ${path}`);
-    cur = cur[key]!;
+/**
+ * Every primitive inside `value` as seen at `type` (a value may carry extra fields its type
+ * does not show), with the expression that reads it from `source`. An array contributes its
+ * length first, so that by the time an element is read the length is known.
+ */
+export function leaves(
+  value: Value,
+  type: TypeName,
+  source: string,
+): Array<{ expr: string; value: bigint | boolean }> {
+  if (type === "bigint" || type === "boolean") {
+    if (typeof value !== "bigint" && typeof value !== "boolean") throw new Error(`not a ${type}`);
+    return [{ expr: source, value }];
   }
-  if (typeof cur === "object") throw new Error(`path ${path} is not a leaf`);
-  return cur;
+  if (type === "A" || type === "AN") {
+    const items = value as ReadonlyArray<Value>;
+    const element: TypeName = type === "A" ? "bigint" : "N";
+    return [
+      { expr: `len(${source})`, value: BigInt(items.length) },
+      ...items.flatMap((item, i) => leaves(item, element, `at(${source}, ${i}n)`)),
+    ];
+  }
+  const record = value as { readonly [k: string]: Value };
+  return FIELDS[type].flatMap(([k, t]) => leaves(record[k]!, t, `${source}.${k}`));
 }

@@ -40,6 +40,15 @@ describe("loops", () => {
     expect(b >= 0n && a * b !== b).toBe(true);
   });
 
+  it("gets scoping, shadowing and mixed control flow right", async () => {
+    // The expected values in this fixture were obtained by running the functions.
+    const report = await verifyFiles([`${DIR}/scoping.law.ts`]);
+    expect(report.files[0]!.diagnostics).toEqual([]);
+    for (const l of report.files[0]!.laws) {
+      expect(l.status, l.name).toBe(l.name.startsWith("FALSE:") ? "disproved" : "proved");
+    }
+  });
+
   it("refutes loops that do not terminate and invariants that do not hold", async () => {
     const report = await verifyFiles([`${DIR}/bad-loops.law.ts`]);
     expect(report.ok).toBe(false);

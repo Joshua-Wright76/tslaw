@@ -62,6 +62,9 @@ function randomValue(type: VType, rng: () => number): unknown {
     if (r < 0.9) return span(1_000_000);
     return span(1_000_000) * 2n ** 64n + span(1_000_000); // far outside 64-bit range
   }
+  if (type.kind === "array") {
+    return Array.from({ length: Math.floor(rng() * 4) }, () => randomValue(type.element, rng));
+  }
   const obj: Record<string, unknown> = {};
   for (const f of type.fields) obj[f.name] = randomValue(f.type, rng);
   return obj;

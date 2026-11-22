@@ -13,7 +13,13 @@
  */
 import path from "node:path";
 import ts from "typescript";
-import { analyzeDialect, resolveCallee, vTypeKey } from "./dialect.js";
+import {
+  analyzeDialect,
+  isArrayHelper,
+  resolveCallee,
+  vTypeKey,
+  type ArrayHelper,
+} from "./dialect.js";
 import type { Diagnostic, VType } from "./types.js";
 import { VERIFIER_COMPILER_OPTIONS } from "./verify.js";
 
@@ -32,8 +38,44 @@ const key = (name: string): string => JSON.stringify(name);
 
 function typeText(t: VType): string {
   if (t.kind === "bigint" || t.kind === "boolean") return t.kind;
+  if (t.kind === "array") return `ReadonlyArray<${typeText(t.element)}>`;
   return `{ ${t.fields.map((f) => `readonly ${key(f.name)}: ${typeText(f.type)}`).join("; ")} }`;
 }
+
+/** Local copies of the runtime's array helpers, for `requires` conditions that use them. */
+const ARRAY_HELPER_SOURCE: Record<ArrayHelper, string> = {
+  len: [`function $len<T>(xs: ReadonlyArray<T>): bigint {`, `  return BigInt(xs.length);`, `}`].join("\n"),
+  at: [
+    `function $at<T>(xs: ReadonlyArray<T>, index: bigint): T {`,
+    `  if (index < 0n || index >= BigInt(xs.length)) throw new RangeError(\`at: index \${index} is out of range for length \${xs.length}\`);`,
+    `  return xs[Number(index)] as T;`,
+    `}`,
+  ].join("\n"),
+  append: [
+    `function $append<T>(xs: ReadonlyArray<T>, x: T): ReadonlyArray<T> {`,
+    `  return [...xs, x];`,
+    `}`,
+  ].join("\n"),
+  concat: [
+    `function $concat<T>(xs: ReadonlyArray<T>, ys: ReadonlyArray<T>): ReadonlyArray<T> {`,
+    `  return [...xs, ...ys];`,
+    `}`,
+  ].join("\n"),
+  slice: [
+    `function $slice<T>(xs: ReadonlyArray<T>, from: bigint, to: bigint): ReadonlyArray<T> {`,
+    `  if (from < 0n || from > to || to > BigInt(xs.length)) throw new RangeError(\`slice: range \${from}..\${to} is out of range for length \${xs.length}\`);`,
+    `  return xs.slice(Number(from), Number(to));`,
+    `}`,
+  ].join("\n"),
+  withAt: [
+    `function $withAt<T>(xs: ReadonlyArray<T>, index: bigint, value: T): ReadonlyArray<T> {`,
+    `  if (index < 0n || index >= BigInt(xs.length)) throw new RangeError(\`withAt: index \${index} is out of range for length \${xs.length}\`);`,
+    `  const out = [...xs];`,
+    `  out[Number(index)] = value;`,
+    `  return out;`,
+    `}`,
+  ].join("\n"),
+};
 
 function isExported(decl: ts.FunctionDeclaration): boolean {
   const mods = decl.modifiers ?? [];
@@ -97,6 +139,23 @@ export function generateGuards(filePaths: ReadonlyArray<string>): GuardResult[] 
       const k = vTypeKey(t);
       const existing = checkers.get(k);
       if (existing) return existing;
+      if (t.kind === "array") {
+        const name = `$array${checkers.size}`;
+        checkers.set(k, name);
+        const element = checkerFor(t.element);
+        checkerDefs.push(
+          [
+            `function ${name}(fn: string, at: string, v: unknown): ${typeText(t)} {`,
+            `  if (!Array.isArray(v)) $fail(fn, \`\${at} must be an array, got \${$show(v)}\`);`,
+            `  const items: ReadonlyArray<unknown> = v;`,
+            `  const out: Array<${typeText(t.element)}> = [];`,
+            `  for (let i = 0; i < items.length; i++) out.push(${element}(fn, \`\${at}[\${i}]\`, items[i]));`,
+            `  return Object.freeze(out);`,
+            `}`,
+          ].join("\n"),
+        );
+        return name;
+      }
       const name = `$record${checkers.size}`;
       checkers.set(k, name);
       const fields = t.fields.map(
@@ -120,6 +179,7 @@ export function generateGuards(filePaths: ReadonlyArray<string>): GuardResult[] 
     const depImports = new Map<ts.FunctionDeclaration, string>();
     const problems: Diagnostic[] = [];
     let usesImplies = false;
+    const usedArrayHelpers = new Set<ArrayHelper>();
 
     /** Source text of a `requires` condition, with callees redirected to what this module can reach. */
     const conditionText = (fnName: string, expr: ts.Expression): string => {
@@ -131,6 +191,9 @@ export function generateGuards(filePaths: ReadonlyArray<string>): GuardResult[] 
           if (callee.kind === "runtime" && callee.helper === "implies") {
             usesImplies = true;
             text = "$implies";
+          } else if (callee.kind === "runtime" && isArrayHelper(callee.helper)) {
+            usedArrayHelpers.add(callee.helper);
+            text = `$${callee.helper}`;
           } else if (callee.kind === "function" && callee.decl.name) {
             if (!isExported(callee.decl)) {
               problems.push({
@@ -226,6 +289,7 @@ export function generateGuards(filePaths: ReadonlyArray<string>): GuardResult[] 
       ...(usesImplies
         ? [`function $implies(premise: boolean, conclusion: boolean): boolean {`, `  return !premise || conclusion;`, `}`]
         : []),
+      ...[...usedArrayHelpers].sort().map((h) => ARRAY_HELPER_SOURCE[h]),
       ...checkerDefs,
       ``,
       wrappers.join("\n\n"),

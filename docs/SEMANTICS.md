@@ -7,7 +7,7 @@ This document defines what a tslaw proof means. It gives
 3. how each construct is translated into SMT-LIB2 for Z3, and
 4. the statement that connects the two: if Z3 reports `unsat`, the law returns `true` for every well-typed input.
 
-**Status.** The correctness statement in section 6 is argued on paper here; it is not machine-checked. The implementation (`src/dialect.ts`, `src/smt.ts`) is hand-written code intended to follow this document, and is tested against real JavaScript execution (`test/soundness.test.ts`, `test/fuzz.test.ts`) rather than proved to follow it. Section 7 lists everything a proof depends on.
+**Status.** The correctness statement in section 6 is argued on paper here. For a core of the subset (section 8) the same statement is machine-checked in Lean; for the rest it is not. The implementation (`src/dialect.ts`, `src/smt.ts`) is hand-written code intended to follow this document, and is tested against real JavaScript execution (`test/soundness.test.ts`, `test/fuzz.test.ts`) rather than proved to follow it. Section 7 lists everything a proof depends on.
 
 When this document and the implementation disagree, that is a bug in one of them. Please report it.
 
@@ -22,6 +22,7 @@ decl     ::= type-declaration                         (erased; see section 2)
            | law("name", (x1: T1, ..., xn: Tn) => body)
 
 T        ::= bigint | boolean | { readonly l1: T1; ...; readonly ln: Tn }     (n >= 1)
+           | readonly T[]                             (also written T[] or ReadonlyArray<T>)
 
 body     ::= e | { block }
 block    ::= const x = e; block
@@ -46,6 +47,8 @@ e        ::= x | n | true | false                     (n is a bigint literal)
            | { l1: e1, ..., ln: en }
            | f(e1, ..., en)
            | implies(e, e)
+           | [e1, ..., en]
+           | len(e) | at(e, e) | append(e, e) | concat(e, e) | slice(e, e, e) | withAt(e, e, e)
            | (e)
 ```
 
@@ -70,13 +73,14 @@ V(bigint)  = Z                 the mathematical integers
 V(boolean) = { true, false }
 V({ readonly l1: T1; ...; readonly ln: Tn })
            = records with at least the fields l1..ln, where field li holds a value of V(Ti)
+V(readonly T[]) = finite sequences of values of V(T)
 ```
 
 Record types are structural. A record with extra fields belongs to the narrower type as well: `{a: 1n, b: true}` is in `V({readonly a: bigint})`. This is TypeScript's width subtyping, and we write `S <: T` when every field of `T` is a field of `S` at a subtype.
 
 Type declarations (`type`, `interface`, `Readonly<...>`) only name these sets; they have no runtime behavior and are erased.
 
-**Typing assumption.** We rely on TypeScript's type checker (with `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) being sound on this subset: if `e` has type `T` and the variables in scope hold values of their declared types, then evaluating `e` yields a value in `V(T)`. The subset excludes every construct known to break this (`any`, casts, non-null assertions, `@ts-ignore`, mutation of aliased data, arrays, optional fields).
+**Typing assumption.** We rely on TypeScript's type checker (with `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`) being sound on this subset: if `e` has type `T` and the variables in scope hold values of their declared types, then evaluating `e` yields a value in `V(T)`. The subset excludes every construct known to break this (`any`, casts, non-null assertions, `@ts-ignore`, mutation of aliased data, optional fields). Arrays are a known hole in TypeScript only when they are written to or indexed directly; verified code can do neither, and reads them only through `at`, which has a precondition instead of an `undefined` result.
 
 ## 3. Evaluation
 
@@ -114,6 +118,20 @@ E |- ei => vi  for each i     [x1 -> v1, ..., xn -> vn] |- body(f) => v
 ------------------------------------------------------------------------
 E |- f(e1, ..., en) => v
 ```
+
+Arrays are immutable sequences. Writing `[v0, ..., vn-1]` for a sequence value:
+
+```
+[e1, ..., en]        => [v1, ..., vn]                where ei => vi
+len(e)               => n                            where e => [v0, ..., vn-1]
+at(e, i)             => vk                           where i => k and 0 <= k < n
+append(e, x)         => [v0, ..., vn-1, w]           where x => w
+concat(e, f)         => [v0, ..., vn-1, w0, ..., wm-1]
+slice(e, a, b)       => [vj, ..., vk-1]              where a => j, b => k and 0 <= j <= k <= n
+withAt(e, i, x)      => [v0, ..., w, ..., vn-1]      (w at position k) where 0 <= k < n
+```
+
+Outside the stated ranges `at`, `slice` and `withAt` throw `RangeError`. Like a function called outside its `requires`, that case is excluded by a call-site obligation rather than modeled.
 
 `&&` and `||` short-circuit in JavaScript. Because every expression in the subset terminates, has no side effects and cannot throw, evaluating both operands gives the same result, so the rules above ignore short-circuiting.
 
@@ -156,6 +174,12 @@ T[{ readonly l1: T1; ...; readonly ln: Tn }] = a datatype R with one constructor
 
 One datatype is declared per distinct record shape (set of field names with their types). Two TypeScript types with the same fields share a datatype.
 
+```
+T[readonly T[]] = (Seq T[T])
+```
+
+The theory of sequences is not part of the SMT-LIB standard, but Z3 and cvc5 implement it with the same syntax and meaning for the operations used here.
+
 ### Projection
 
 SMT datatypes are not structural, so where TypeScript lets a value of type `S` flow into a position of type `T` with `S <: T`, the translation inserts an explicit conversion that drops the extra fields:
@@ -187,6 +211,22 @@ T[e.l]G          = (S_l T[e]G)                        where S is the type of e
 T[{ li: ei }]G   = (mk_S T[e1]G ... T[en]G)           fields in the datatype's order
 T[f(e1..en)]G    = (f' T[e1 : T1]G ... T[en : Tn]G)   where Ti are f's parameter types
 ```
+
+### Arrays
+
+```
+T[[e1, ..., en] : readonly A[]]G = (seq.++ (seq.unit T[e1 : A]G) ... (seq.unit T[en : A]G))
+                                   (seq.unit ... alone for n = 1, (as seq.empty (Seq T[A])) for n = 0)
+T[len(e)]G          = (seq.len T[e]G)
+T[at(e, i)]G        = (seq.nth T[e]G T[i]G)
+T[append(e, x)]G    = (seq.++ T[e]G (seq.unit T[x : A]G))
+T[concat(e, f)]G    = (seq.++ T[e]G T[f]G)
+T[slice(e, a, b)]G  = (seq.extract T[e]G T[a]G (- T[b]G T[a]G))
+T[withAt(e, i, x)]G = (seq.++ (seq.extract s 0 i) (seq.unit T[x : A]G) (seq.extract s (+ i 1) (- (seq.len s) i 1)))
+                      with s = T[e]G and i = T[i]G
+```
+
+`seq.nth` and `seq.extract` are unspecified or clipped outside the sequence, so `at`, `slice` and `withAt` each generate a call-site obligation exactly like a `requires` (see Contracts): `0 <= i < len` for `at` and `withAt`, `0 <= a <= b <= len` for `slice`. An array literal is translated at the element type its context expects. Projection (the previous subsection) is not defined between array types: an array of a wider record type where an array of a narrower one is expected is rejected, since converting it would need a new sequence.
 
 ### Blocks
 
@@ -368,7 +408,7 @@ Functions that contain loops are treated like recursive ones in one more respect
 
 ## 6. Correctness statement
 
-Let `enc` map values to SMT values: integers and booleans to themselves, and a record `r` viewed at type `T` to `(mk_T enc(r(l1)) ... enc(r(ln)))`, keeping only `T`'s fields.
+Let `enc` map values to SMT values: integers and booleans to themselves, a record `r` viewed at type `T` to `(mk_T enc(r(l1)) ... enc(r(ln)))`, keeping only `T`'s fields, and an array to the sequence of its elements' encodings.
 
 **Lemma (translation agrees with evaluation).** Let `e` be a well-typed expression of type `T`, `E` an environment whose values have the declared types, and `G` a term environment with `G(x)` denoting `enc(E(x))` for every variable. If `E |- e => v`, then in every SMT model that satisfies the function definitions, `T[e]G` denotes `enc(v)` at type `T`. The same holds for blocks.
 
@@ -388,10 +428,36 @@ Both theorems below are stated for final verdicts, after the dependency adjustme
 
 A `PROVED` verdict is only as trustworthy as each of these:
 
-1. **This document's argument**, which is informal.
+1. **This document's argument**, which is informal, except for the core calculus of section 8, where it is checked by Lean.
 2. **The implementation follows this document.** Checked by tests, not proved. `test/fuzz.test.ts` generates random programs in the subset, runs them in JavaScript, and requires the prover to agree; `test/soundness.test.ts` runs every proved law on random inputs and replays every counterexample.
 3. **TypeScript's type checker is sound on the subset** (section 2).
 4. **Z3 is correct**, including its answer `unsat`. With `--cross-check` this is weakened to "Z3 and cvc5 are not both wrong in the same way": cvc5 must independently reach the same verdict, and for `unsat` must produce a proof that its own proof checker accepts.
 5. **The JavaScript engine implements `bigint` and object semantics as specified.** A real engine also has finite memory: a `bigint` computation can throw `RangeError` when a value is too large to represent, and a deep recursion can overflow the call stack. The model ignores both; a termination proof bounds neither depth nor time.
 6. **Callers respect the types.** The theorem quantifies over well-typed inputs. Unverified code that passes ill-typed values (through `any`, casts or plain JavaScript) is outside it. The wrappers generated by `tslaw guard` discharge this assumption at runtime for calls that go through them: they establish that each argument is a value of its declared type (as a fresh frozen copy) and that `pre_f` holds before calling `f`. The generator itself (`src/guard.ts`) is tested, not proved.
 7. **The law says what you meant.** tslaw proves the laws that are written, nothing more.
+
+## 8. The machine-checked core
+
+[`proofs/Core.lean`](../proofs/Core.lean) formalizes a core of the subset in Lean 4 and proves the statements of section 6 for it. It has no dependencies; `npm run prove` (or `cd proofs && lean Core.lean`) checks it in a few seconds, and CI does so on every change.
+
+**What the core contains.** `bigint` and `boolean`; arithmetic, comparisons, `===`/`!==`, `!`, `&&`, `||`, `implies` and the ternary; blocks built from `const`, `if`/`else` and `return`.
+
+**What is proved.**
+
+| Lean theorem | Statement | Section |
+|---|---|---|
+| `eval_typed`, `evalBlock_typed` | A well-typed expression or block evaluates to a value of its type (totality). | 3 |
+| `tr_correct`, `trBlock_correct` | In every well-sorted model, the translated term denotes the value the source evaluates to. | 6, lemma |
+| `proved_sound` | If no well-sorted model satisfies the query, the law's body evaluates to `true` for all well-typed inputs. | 6 |
+| `disproved_sound` | A model of the query is a well-typed input on which the body evaluates to `false`. | 6 |
+
+The point of interest is the gap the paper argument skates over. The source semantics (`eval`) is JavaScript's: `&&`, `||` and the ternary do not evaluate the operand they skip, and an operation on the wrong kind of value has no result. The target semantics (`denote`) is SMT-LIB's: every subterm must have a value. The proof closes the gap exactly as section 3 says, through totality: the skipped operand is well-typed, so it has a value, so evaluating it changes nothing.
+
+The theorems depend only on Lean's standard axioms `propext` and `Quot.sound` (`#print axioms`), and `test/proofs.test.ts` checks that they are not vacuous: translating `&&` as `or`, `implies` as `and`, `!==` as `=`, swapping the branches of an `if`, or leaving the query un-negated each makes the file fail to check.
+
+**What this does not establish.**
+
+- It is a proof about a *model* of the translator, written by hand to match `src/smt.ts`. Nothing connects the Lean definitions to the TypeScript code except reading both, and the tests of section 7, item 2.
+- Records and projection, function calls, contracts, recursion and termination, loops and arrays are outside the core. Their arguments (sections 4 and 6) remain on paper. The recursion and loop arguments in particular, which decide when a definition may be assumed at all, are the most delicate part of the system and are not mechanized.
+- The model identifies source and solver variable names; the implementation renames them apart.
+- "The solver answered `unsat`" is taken as a hypothesis. Whether Z3 is right is section 7, item 4.

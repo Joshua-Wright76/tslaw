@@ -2,7 +2,7 @@
  * `tslaw guard`: generated wrappers that check argument types and `requires` at runtime.
  *
  * `test/fixtures/guard/*.guarded.ts` are committed generator output; regenerate them with
- * `node dist/cli.js guard test/fixtures/guard/bank.ts test/fixtures/guard/limits.ts`.
+ * `node dist/cli.js guard test/fixtures/guard/bank.ts test/fixtures/guard/limits.ts test/fixtures/guard/basket.ts`.
  */
 import fs from "node:fs";
 import ts from "typescript";
@@ -11,6 +11,7 @@ import { generateGuards } from "../src/guard.js";
 import { VERIFIER_COMPILER_OPTIONS } from "../src/verify.js";
 import * as guarded from "./fixtures/guard/bank.guarded.js";
 import * as raw from "./fixtures/guard/bank.js";
+import * as basket from "./fixtures/guard/basket.guarded.js";
 
 const DIR = "test/fixtures/guard";
 const account = (balance: bigint, active = true) => ({ balance, owner: { id: 1n, active } });
@@ -19,7 +20,7 @@ const untyped = guarded as unknown as Record<string, (...args: unknown[]) => unk
 
 describe("tslaw guard", () => {
   it("generates exactly the committed wrappers", () => {
-    const results = generateGuards([`${DIR}/bank.ts`, `${DIR}/limits.ts`]);
+    const results = generateGuards([`${DIR}/bank.ts`, `${DIR}/limits.ts`, `${DIR}/basket.ts`]);
     for (const r of results) {
       expect(r.diagnostics).toEqual([]);
       expect(r.source).toBe(fs.readFileSync(r.outFile, "utf8"));
@@ -28,7 +29,10 @@ describe("tslaw guard", () => {
   });
 
   it("generates code that passes the strict type check", () => {
-    const program = ts.createProgram([`${DIR}/bank.guarded.ts`, `${DIR}/limits.guarded.ts`], VERIFIER_COMPILER_OPTIONS);
+    const program = ts.createProgram(
+      [`${DIR}/bank.guarded.ts`, `${DIR}/limits.guarded.ts`, `${DIR}/basket.guarded.ts`],
+      VERIFIER_COMPILER_OPTIONS,
+    );
     const diags = ts.getPreEmitDiagnostics(program).map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n"));
     expect(diags).toEqual([]);
   });
@@ -78,6 +82,34 @@ describe("tslaw guard", () => {
     expect(result.balance).toBe(40n);
     expect(Object.isFrozen(result.owner)).toBe(true);
     expect("extra" in result).toBe(false);
+  });
+
+  it("checks arrays element by element and copies them", () => {
+    const loose = basket as unknown as Record<string, (...args: unknown[]) => unknown>;
+    const items = [{ price: 5n, qty: 2n }, { price: 7n, qty: 3n }];
+    expect(basket.lineTotal(items, 1n)).toBe(21n);
+    expect(basket.count(items, [[1n], []])).toBe(4n);
+    expect(() => loose["lineTotal"]!("nope", 0n)).toThrow(/items must be an array, got string nope/);
+    expect(() => loose["lineTotal"]!([{ price: 5n, qty: 2n }, { price: 7 }], 0n)).toThrow(
+      /items\[1\]\.price must be a bigint, got number 7/,
+    );
+    expect(() => loose["count"]!(items, [[1n], [2]])).toThrow(/tags\[1\]\[0\] must be a bigint/);
+    // A hole reads as `undefined`, which is not an element.
+    expect(() => loose["lineTotal"]!(new Array(2), 0n)).toThrow(/items\[0\] must be an object/);
+    // Preconditions that use `len` and `at` are evaluated on the checked copy.
+    expect(() => basket.lineTotal(items, 2n)).toThrow(/requires\(0n <= index && index < len\(items\)\)/);
+    expect(() => basket.lineTotal(items, -1n)).toThrow(RangeError);
+    expect(() => basket.lineTotal([{ price: 5n, qty: -1n }], 0n)).toThrow(/at\(items, index\)\.qty >= 0n/);
+    // An array that changes between reads cannot get past the check.
+    let reads = 0;
+    const shifty = new Proxy([{ price: 5n, qty: 2n }], {
+      get(target, key, receiver) {
+        if (key === "0") reads++;
+        return Reflect.get(target, key, receiver) as unknown;
+      },
+    });
+    expect(basket.lineTotal(shifty, 0n)).toBe(10n);
+    expect(reads).toBe(1);
   });
 
   it("refuses to generate a guard whose `requires` needs a function it cannot import", () => {

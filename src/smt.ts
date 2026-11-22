@@ -1,5 +1,6 @@
 import ts from "typescript";
 import {
+  isArrayHelper,
   getLocation,
   resolveCallee,
   resolveVType,
@@ -76,6 +77,7 @@ class RecordRegistry {
   register(type: VType): string {
     if (type.kind === "bigint") return "Int";
     if (type.kind === "boolean") return "Bool";
+    if (type.kind === "array") return `(Seq ${this.register(type.element)})`;
     const key = vTypeKey(type);
     const existing = this.byKey.get(key);
     if (existing) return existing.smtName;
@@ -349,7 +351,27 @@ export function lowerModuleLaws(
   const nextVar = (hint: string): string => `v_${freshId++}_${hint.replace(/[^A-Za-z0-9_]/g, "")}`;
 
   const resolveExprVType = (node: ts.Node): VType => {
-    const res = resolveVType(checker, checker.getTypeAtLocation(node));
+    let type = checker.getTypeAtLocation(node);
+    if (type.getFlags() & ts.TypeFlags.Never) {
+      // TypeScript gives `never` to code it can see is unreachable, for example the right side
+      // of `b || ...` after `b = true`. Such code still needs a well-formed translation, so
+      // fall back to the type the expression would have without that knowledge.
+      let inner = node;
+      while (ts.isParenthesizedExpression(inner)) inner = inner.expression;
+      if (ts.isConditionalExpression(inner)) {
+        try {
+          return resolveExprVType(inner.whenFalse);
+        } catch {
+          return resolveExprVType(inner.whenTrue);
+        }
+      }
+      if (ts.isIdentifier(inner)) {
+        const sym = checker.getSymbolAtLocation(inner);
+        const decl = sym?.valueDeclaration;
+        if (sym && decl) type = checker.getTypeOfSymbolAtLocation(sym, decl);
+      }
+    }
+    const res = resolveVType(checker, type);
     if (!res.ok) {
       throw new Error(`SMT lowering encountered unsupported type: ${res.reason}`);
     }
@@ -364,6 +386,12 @@ export function lowerModuleLaws(
    */
   const project = (smt: string, from: VType, to: VType): string => {
     if (vTypeKey(from) === vTypeKey(to)) return smt;
+    if (from.kind === "array" && to.kind === "array") {
+      // Would need a new sequence with every element converted.
+      throw new Error(
+        "an array of records with extra fields cannot be used where an array of a narrower record type is expected; build the array at the narrower type",
+      );
+    }
     if (from.kind !== "record" || to.kind !== "record") {
       throw new Error(`Cannot convert ${vTypeKey(from)} to ${vTypeKey(to)}`);
     }
@@ -411,8 +439,18 @@ export function lowerModuleLaws(
       });
       return `(${recDef.ctorName} ${args.join(" ")})`;
     }
+    if (ts.isArrayLiteralExpression(expr)) {
+      // Elements are lowered at the expected element type, so `[]` and literals of wider
+      // records work wherever the context says what the array holds.
+      const type = expected ?? resolveExprVType(expr);
+      if (type.kind !== "array") throw new Error("Array literal where no array is expected");
+      const sort = registry.register(type);
+      const items = expr.elements.map((el) => `(seq.unit ${lowerExpr(el, env, type.element)})`);
+      if (items.length === 0) return `(as seq.empty ${sort})`;
+      return items.length === 1 ? items[0]! : `(seq.++ ${items.join(" ")})`;
+    }
     const smt = lowerExprRaw(expr, env);
-    if (!expected || expected.kind !== "record") return smt;
+    if (!expected || (expected.kind !== "record" && expected.kind !== "array")) return smt;
     return project(smt, resolveExprVType(expr), expected);
   };
 
@@ -520,6 +558,48 @@ export function lowerModuleLaws(
           ? lowerExpr(conclusionExpr, env)
           : assuming(premise, () => lowerExpr(conclusionExpr, env));
         return `(=> ${premise} ${conclusion})`;
+      }
+      if (callee.kind === "runtime" && isArrayHelper(callee.helper)) {
+        // Arrays are SMT sequences. Reading or cutting outside the array has no meaning (and
+        // throws at runtime), so those helpers come with a precondition like any `requires`.
+        const [first, ...others] = expr.arguments;
+        if (!first) throw new Error(`\`${fnName}\` needs an array argument`);
+        const type = resolveExprVType(first);
+        if (type.kind !== "array") throw new Error(`\`${fnName}\` needs an array argument`);
+        const xs = lowerExpr(first, env);
+        const argument = (i: number, expected?: VType): string => {
+          const arg = others[i];
+          if (!arg) throw new Error(`Wrong number of arguments in call to \`${fnName}\``);
+          return lowerExpr(arg, env, expected);
+        };
+        const needs = (condition: string): void => {
+          sink.push({ kind: "requires", callee: fnName, node: expr, formula: closeOver(condition) });
+        };
+        switch (callee.helper) {
+          case "len":
+            return `(seq.len ${xs})`;
+          case "at": {
+            const i = argument(0);
+            needs(`(and (<= 0 ${i}) (< ${i} (seq.len ${xs})))`);
+            return `(seq.nth ${xs} ${i})`;
+          }
+          case "append":
+            return `(seq.++ ${xs} (seq.unit ${argument(0, type.element)}))`;
+          case "concat":
+            return `(seq.++ ${xs} ${argument(0, type)})`;
+          case "slice": {
+            const from = argument(0);
+            const to = argument(1);
+            needs(`(and (<= 0 ${from}) (<= ${from} ${to}) (<= ${to} (seq.len ${xs})))`);
+            return `(seq.extract ${xs} ${from} (- ${to} ${from}))`;
+          }
+          case "withAt": {
+            const i = argument(0);
+            const v = argument(1, type.element);
+            needs(`(and (<= 0 ${i}) (< ${i} (seq.len ${xs})))`);
+            return `(seq.++ (seq.extract ${xs} 0 ${i}) (seq.unit ${v}) (seq.extract ${xs} (+ ${i} 1) (- (seq.len ${xs}) ${i} 1)))`;
+          }
+        }
       }
       if (callee.kind !== "function") {
         throw new Error(`Cannot resolve callee \`${fnName}\` during SMT lowering`);

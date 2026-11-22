@@ -23,10 +23,9 @@ import { verifyFiles } from "../src/verify.js";
 import {
   TYPE_DECLS,
   generateFunctions,
-  leafPaths,
+  leaves,
   makeRng,
   randomValue,
-  readPath,
   valueToTs,
   type Value,
 } from "./fuzz/generate.js";
@@ -61,7 +60,7 @@ describe("fuzz: the SMT model agrees with JavaScript on generated programs", () 
         const modFile = path.join(OUT_DIR, `gen${seed}.ts`);
         fs.writeFileSync(
           modFile,
-          `"use verified";\n\nimport { decreases, implies } from "${RUNTIME}";\n\n${TYPE_DECLS}\n${fns.map((f) => f.source).join("\n\n")}\n`,
+          `"use verified";\n\nimport { append, at, concat, decreases, implies, len, slice, withAt } from "${RUNTIME}";\n\n${TYPE_DECLS}\n${fns.map((f) => f.source).join("\n\n")}\n`,
         );
         const mod = (await import(modFile)) as Record<string, (...args: Value[]) => Value>;
 
@@ -74,16 +73,16 @@ describe("fuzz: the SMT model agrees with JavaScript on generated programs", () 
             if (f.recursive && rng() < 0.7) args[0] = BigInt(Math.floor(rng() * 7) - 1);
             const result = mod[f.name]!(...args);
             const callSrc = `${f.name}(${args.map(valueToTs).join(", ")})`;
-            const paths = leafPaths(f.ret);
-            const check = (flip: string | undefined): string =>
-              paths
-                .map((p) => {
-                  let want = readPath(result, p);
-                  if (p === flip) want = typeof want === "bigint" ? want + 1n : !want;
-                  return `r${p} === ${valueToTs(want)}`;
+            const parts = leaves(result, f.ret, "r");
+            const flipped = Math.floor(rng() * parts.length);
+            const check = (flip: number | undefined): string =>
+              parts
+                .map((p, k) => {
+                  let want = p.value;
+                  if (k === flip) want = typeof want === "bigint" ? want + 1n : !want;
+                  return `${p.expr} === ${valueToTs(want)}`;
                 })
                 .join(" && ");
-            const flipped = paths[Math.floor(rng() * paths.length)]!;
             laws.push(
               `law("ok ${f.name} #${i}", () => {\n  const r = ${callSrc};\n  return ${check(undefined)};\n});`,
               `law("bad ${f.name} #${i}", () => {\n  const r = ${callSrc};\n  return ${check(flipped)};\n});`,
@@ -95,7 +94,7 @@ describe("fuzz: the SMT model agrees with JavaScript on generated programs", () 
         const lawFile = path.join(OUT_DIR, `gen${seed}.law.ts`);
         fs.writeFileSync(
           lawFile,
-          `"use verified";\n\nimport { law } from "${RUNTIME}";\nimport { ${fns.map((f) => f.name).join(", ")} } from "./gen${seed}.js";\n\n${laws.join("\n")}\n`,
+          `"use verified";\n\nimport { at, law, len } from "${RUNTIME}";\nimport { ${fns.map((f) => f.name).join(", ")} } from "./gen${seed}.js";\n\n${laws.join("\n")}\n`,
         );
         lawFiles.push(lawFile);
       }
@@ -106,8 +105,18 @@ describe("fuzz: the SMT model agrees with JavaScript on generated programs", () 
       const unconfirmed: string[] = [];
       let gotProved = 0;
       let gotDisproved = 0;
+      let rejectedByTypeScript = 0;
       for (const file of report.files) {
         const name = path.basename(file.file);
+        // Now and then the generator writes a comparison that TypeScript rejects because an
+        // enclosing `if (x === 5n)` has narrowed `x` to that literal ("no overlap"). Such a
+        // module is not in the subset, so it says nothing about the translation; skip it.
+        if (file.diagnostics.length > 0 && file.diagnostics.every((d) => d.code === "TS2367")) {
+          rejectedByTypeScript++;
+          expectedProved -= FUNCTIONS_PER_MODULE * INPUTS_PER_FUNCTION;
+          expectedDisproved -= FUNCTIONS_PER_MODULE * INPUTS_PER_FUNCTION;
+          continue;
+        }
         for (const d of file.diagnostics) {
           problems.push(`${name}: [${d.code}] ${d.message} (${d.location?.file ?? ""}:${d.location?.line ?? ""})`);
         }
@@ -129,6 +138,7 @@ describe("fuzz: the SMT model agrees with JavaScript on generated programs", () 
       expect(unconfirmed.length, unconfirmed.join("\n")).toBeLessThanOrEqual(
         Math.ceil((expectedProved + expectedDisproved) * 0.02),
       );
+      expect(rejectedByTypeScript).toBeLessThanOrEqual(Math.ceil(RUNS * 0.02));
       expect(gotProved).toBe(expectedProved);
       expect(gotDisproved).toBe(expectedDisproved);
     } catch (err) {

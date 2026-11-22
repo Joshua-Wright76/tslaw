@@ -77,6 +77,32 @@ function decodeSExprValue(
     return { formatted: String(b), raw: b };
   }
 
+  if (type.kind === "array") {
+    // Solvers print sequences as (as seq.empty (Seq T)), (seq.unit x), or (seq.++ part ...).
+    const elements = (e: SExpr): SExpr[] | undefined => {
+      if (!Array.isArray(e)) return undefined;
+      if (e[0] === "as" && e[1] === "seq.empty") return [];
+      if (e[0] === "seq.unit" && e.length === 2) return [e[1]!];
+      if (e[0] === "seq.++") {
+        const out: SExpr[] = [];
+        for (const part of e.slice(1)) {
+          const inner = elements(part);
+          if (!inner) return undefined;
+          out.push(...inner);
+        }
+        return out;
+      }
+      return undefined;
+    };
+    const items = elements(expr);
+    if (!items) return { formatted: JSON.stringify(expr), raw: expr };
+    const decoded = items.map((item) => decodeSExprValue(item, type.element, recordsByCtor));
+    return {
+      formatted: `[${decoded.map((d) => d.formatted).join(", ")}]`,
+      raw: decoded.map((d) => d.raw),
+    };
+  }
+
   // Record datatype: (mk_Rec_0 val1 val2 ...)
   if (Array.isArray(expr) && typeof expr[0] === "string") {
     const recDef = recordsByCtor.get(expr[0]);

@@ -159,7 +159,12 @@ export async function verifyFiles(
     try {
       loweredLaws = lowerModuleLaws(checker, analysis.functions, analysis.laws, analysis.ensures, sf);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
+      const message =
+        err instanceof Error
+          ? process.env["TSLAW_DEBUG"] && err.stack
+            ? err.stack
+            : err.message
+          : String(err);
       errors++;
       fileResults.push({
         file: absPath,

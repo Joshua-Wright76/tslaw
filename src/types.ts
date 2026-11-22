@@ -1,6 +1,7 @@
 export type VType =
   | { readonly kind: "bigint" }
   | { readonly kind: "boolean" }
+  | { readonly kind: "array"; readonly element: VType }
   | {
       readonly kind: "record";
       /** Sorted field entries for canonical structural identity. */

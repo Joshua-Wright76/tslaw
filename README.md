@@ -164,6 +164,52 @@ The enclosing function's `requires` is part of every invariant automatically. Ot
 
 Not supported: `for` and `do` loops, `break`, `continue`, `return` inside a loop, loops inside `law` or `ensures` callbacks, and assigning to parameters or record fields. Records stay immutable: `acc = { ...}` replaces the whole value.
 
+### Arrays
+
+Arrays of supported types (`readonly T[]`, `ReadonlyArray<T>` or `T[]`) are supported through six helpers, because the built-in operations either involve `number` or silently produce `undefined`:
+
+```ts
+import { append, at, concat, len, slice, withAt } from "tslaw/runtime";
+
+len(xs)              // number of elements, as a bigint
+at(xs, i)            // element i            requires 0n <= i && i < len(xs)
+append(xs, x)        // new array: xs then x
+concat(xs, ys)       // new array: xs then ys
+slice(xs, from, to)  // new array            requires 0n <= from && from <= to && to <= len(xs)
+withAt(xs, i, x)     // new array, i replaced  requires 0n <= i && i < len(xs)
+```
+
+- The ones with a precondition are checked like any `requires`: `DISPROVED "requires of at at line N"` comes with an array and an index that go out of range. At runtime they also check, and throw `RangeError` instead of returning `undefined`.
+- None of them changes its argument; verified code has no way to mutate an array.
+- Array literals `[a, b, c]` work wherever the element type is known. A bare `[]` needs a type annotation.
+- Laws can quantify over arrays, and counterexamples are shown as arrays (`xs = [3n, 1n]`).
+
+Statements about every element are written with recursion or loops, since there are no quantifiers:
+
+```ts
+export function sumPrefix(xs: readonly bigint[], n: bigint): bigint {
+  requires(0n <= n && n <= len(xs));
+  decreases(n);
+  return n === 0n ? 0n : sumPrefix(xs, n - 1n) + at(xs, n - 1n);
+}
+
+export function sum(xs: readonly bigint[]): bigint {
+  let i = 0n;
+  let acc = 0n;
+  while (i < len(xs)) {
+    invariant(0n <= i && i <= len(xs) && acc === sumPrefix(xs, i));
+    decreases(len(xs) - i);
+    acc += at(xs, i);
+    i += 1n;
+  }
+  return acc;
+}
+
+ensures(sum, (xs, result) => result === sumPrefix(xs, len(xs)));
+```
+
+Limits: no `xs.length`, `xs[i]`, methods, spread, or `===` on arrays; no tuples; an array of records with extra fields cannot be passed where an array of a narrower record type is expected. Z3 is weaker on arrays than on integers: a law that needs a case split on two symbolic indices (such as "`withAt(xs, i, v)` read at `j`") may come back `UNKNOWN` until it is stated case by case. cvc5 is stronger here, so `--cross-check` can decide some of those ("by cvc5 only").
+
 ### Guarding the boundary
 
 Proofs cover calls from verified code. Anything else (plain JavaScript, values typed `any`, parsed JSON) can still call a verified function with arguments that break its types or its `requires`. `tslaw guard` generates a checked entry point for those callers:
@@ -173,7 +219,7 @@ tslaw guard src/bank.ts        # writes src/bank.guarded.ts
 tslaw guard src/bank.ts --check   # for CI: fail if the file on disk is missing or stale
 ```
 
-`bank.guarded.ts` exports a wrapper for each exported function of `bank.ts`. Each wrapper checks every argument's runtime type field by field, copies records into frozen objects that hold only the declared fields (so a getter or later mutation cannot change what was checked), evaluates the `requires` conditions, and then calls the verified function. A bad type throws `TypeError`; a violated precondition throws `RangeError`.
+`bank.guarded.ts` exports a wrapper for each exported function of `bank.ts`. Each wrapper checks every argument's runtime type field by field and element by element, copies records and arrays into frozen objects that hold only the declared fields (so a getter or later mutation cannot change what was checked), evaluates the `requires` conditions, and then calls the verified function. A bad type throws `TypeError`; a violated precondition throws `RangeError`.
 
 Import from `./bank.guarded.js` in unverified code and from `./bank.js` in verified code. A function used inside a `requires` must be exported so the wrapper can call it.
 
@@ -196,6 +242,7 @@ Each file goes through three stages. A failure at any stage stops that file.
 - `bigint`, modeled as a mathematical integer (exact, unbounded).
 - `boolean`.
 - Records whose fields are all `readonly` (written out, or via `Readonly<...>`) and themselves supported types. Passing a record with extra fields where fewer are expected is allowed, as in TypeScript.
+- Arrays of supported types, used through `len`, `at`, `append`, `concat`, `slice`, `withAt`.
 
 **Code**
 
@@ -205,16 +252,16 @@ Each file goes through three stages. A failure at any stage stops that file.
 - `const` and `let` bindings (`const` also with object destructuring), assignment to `let` variables, `if`/`else`, ternaries. Every path through a function must end in `return`.
 - `while` loops with `invariant(...)` and `decreases(...)`.
 - Operators: `+ - *`, comparisons, `===`/`!==` on `bigint` and `boolean`, `&& || !`.
-- Calls to other verified functions, and `implies(p, q)`.
-- Imports: `law`, `implies`, `requires`, `ensures`, `decreases`, `invariant` from `tslaw/runtime`, types from anywhere, and functions from other `"use verified";` modules.
+- Calls to other verified functions, `implies(p, q)`, and the array helpers.
+- Imports: `law`, `implies`, `requires`, `ensures`, `decreases`, `invariant` and the array helpers from `tslaw/runtime`, types from anywhere, and functions from other `"use verified";` modules.
 
 **Not allowed**
 
-- `number` (floating point cannot be modeled exactly; use `bigint`), `any`, `unknown`, `null`/`undefined`, unions, arrays, tuples, strings.
+- `number` (floating point cannot be modeled exactly; use `bigint`), `any`, `unknown`, `null`/`undefined`, unions, tuples, strings.
 - `var`, assignment to anything but a local `let`, `for`/`do` loops, `break`/`continue`, `throw`/`try`, `async`, generics, classes.
 - Casts (`as`, `!`) and `@ts-ignore`-style comments.
 - `/` and `%` (JavaScript rounds toward zero and Z3 does not; not yet supported).
-- `===` on records (JavaScript compares identity, not contents; compare fields instead).
+- `===` on records and arrays (JavaScript compares identity, not contents; compare fields or elements instead).
 
 ## What PROVED means
 
@@ -231,6 +278,8 @@ To keep that last point honest, the test suite cross-checks verdicts against rea
 The translation itself is also fuzzed: `test/fuzz.test.ts` generates random programs in the verified subset, runs them in JavaScript, and requires the prover to agree with every result (`TSLAW_FUZZ_RUNS=300 npm test -- test/fuzz.test.ts` for a longer run).
 
 [`docs/SEMANTICS.md`](docs/SEMANTICS.md) defines precisely what the subset means, how it is translated for Z3, and what a proof depends on.
+
+For a core of the subset (integers, booleans, the operators, `const`, `if`/`else`), the claim "if the solver says `unsat`, the law holds for every well-typed input" is itself machine-checked: [`proofs/Core.lean`](proofs/Core.lean) is a Lean 4 proof that the translation agrees with JavaScript evaluation and that both verdicts are sound. It covers a model of the translator, not the TypeScript code, and it does not cover records, calls, contracts, recursion, loops or arrays; section 8 of the semantics document says exactly what it does and does not establish.
 
 **If tslaw proves a law that fails when you run it, that is the most serious kind of bug. Please [open an issue](https://github.com/Joshua-Wright76/tslaw/issues) with the smallest file that reproduces it.**
 
@@ -252,8 +301,8 @@ Codes starting with `TS` come from the TypeScript compiler. The rest are tslaw's
 | `LAW012` | Mutating or bitwise unary operator (`++`, `--`, `~`). |
 | `LAW013` | Division or modulo (not yet supported). |
 | `LAW014` | Any other unsupported binary operator. |
-| `LAW015` | `===`/`!==` used on records. |
-| `LAW016` | Property access on something that is not a verified record. |
+| `LAW015` | `===`/`!==` used on records or arrays. |
+| `LAW016` | Property access on something that is not a verified record (including `xs.length` and array methods). |
 | `LAW017` | Object literal with a computed key, spread, getter, setter, or method. |
 | `LAW018` | Call to something that is not a verified function, or `implies` with the wrong number of arguments. |
 | `LAW019` | Type assertion (`as`, `<T>x`, `x!`). |
@@ -276,6 +325,7 @@ Codes starting with `TS` come from the TypeScript compiler. The rest are tslaw's
 | `LAW036` | Malformed `ensures(...)`: needs a verified function and a callback taking its parameters plus the result. |
 | `LAW037` | Malformed `decreases(...)`: not directly after the `requires` statements, repeated, a non-`bigint` measure, a different number of measures than the other functions in the same recursion, or a `requires`/`decreases` that calls the recursion itself. |
 | `LAW038` | Malformed loop or assignment: no `decreases(...)` at the start of the loop body, misplaced `invariant(...)`, `return` inside a loop, assignment to something that is not a local `let`, or a loop in a recursive function that calls back into the recursion. |
+| `LAW039` | Unsupported array use: `xs[i]`, spread or holes in a literal, or an array helper with the wrong arguments or an array whose element type is unknown (such as a bare `[]`). |
 | `LAW040` | `tslaw guard` cannot generate a wrapper: the module is not verified, or a `requires` calls a function that is not exported. |
 | `LAW090` | Internal: translation to SMT failed. Please report it. |
 
@@ -286,7 +336,8 @@ git clone https://github.com/Joshua-Wright76/tslaw.git
 cd tslaw
 npm install
 npm run build
-npm test          # needs z3 on PATH; takes about 30 seconds
+npm test          # needs z3 on PATH; takes about a minute
+npm run prove     # optional: check proofs/Core.lean (needs Lean 4, https://lean-lang.org/install/)
 
 node dist/cli.js check examples/tokens.law.ts examples/bank.law.ts   # all proved
 node dist/cli.js check examples/buggy.law.ts                         # a counterexample
@@ -296,7 +347,9 @@ node dist/cli.js check examples/tokens.law.ts --emit-smt             # see the S
 
 Files in `examples/` import the runtime by relative path (`../src/runtime.js`) so they work inside this repository; in your own project, import `tslaw/runtime`.
 
-Layout: `src/dialect.ts` (subset checker), `src/smt.ts` (translation to SMT-LIB2), `src/z3.ts` (solver runner), `src/verify.ts` (pipeline), `src/cli.ts`.
+Tests that need cvc5 or Lean are skipped when those are not installed.
+
+Layout: `src/dialect.ts` (subset checker), `src/smt.ts` (translation to SMT-LIB2), `src/z3.ts` (solver runner), `src/verify.ts` (pipeline), `src/guard.ts` (runtime guards), `src/cli.ts`, `proofs/` (Lean).
 
 ## License
 

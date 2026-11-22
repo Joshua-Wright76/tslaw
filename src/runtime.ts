@@ -65,6 +65,61 @@ export function ensures<A extends unknown[], R>(
   // Proved at compile time by tslaw.
 }
 
+// ---------------------------------------------------------------------------
+// Arrays
+//
+// Verified code cannot use `xs.length` or `xs[i]`: both involve `number`, and `xs[i]` is
+// `undefined` when `i` is out of range. These helpers work with `bigint` instead, and the ones
+// that take an index have a precondition that `tslaw check` proves at every call. At runtime
+// they check it too and throw `RangeError`, so an unverified caller cannot read out of range.
+// None of them changes its argument.
+// ---------------------------------------------------------------------------
+
+function inRange(name: string, ok: boolean, detail: string): void {
+  if (!ok) throw new RangeError(`${name}: ${detail}`);
+}
+
+/** The number of elements of `xs`. */
+export function len<T>(xs: ReadonlyArray<T>): bigint {
+  return BigInt(xs.length);
+}
+
+/** Element `index` of `xs`. Requires `0n <= index && index < len(xs)`. */
+export function at<T>(xs: ReadonlyArray<T>, index: bigint): T {
+  inRange("at", index >= 0n && index < BigInt(xs.length), `index ${index} is out of range for length ${xs.length}`);
+  return xs[Number(index)] as T;
+}
+
+/** A new array: `xs` followed by `x`. */
+export function append<T>(xs: ReadonlyArray<T>, x: T): ReadonlyArray<T> {
+  return [...xs, x];
+}
+
+/** A new array: `xs` followed by `ys`. */
+export function concat<T>(xs: ReadonlyArray<T>, ys: ReadonlyArray<T>): ReadonlyArray<T> {
+  return [...xs, ...ys];
+}
+
+/**
+ * A new array with elements `from` (inclusive) to `to` (exclusive) of `xs`.
+ * Requires `0n <= from && from <= to && to <= len(xs)`.
+ */
+export function slice<T>(xs: ReadonlyArray<T>, from: bigint, to: bigint): ReadonlyArray<T> {
+  inRange("slice", from >= 0n && from <= to && to <= BigInt(xs.length), `range ${from}..${to} is out of range for length ${xs.length}`);
+  return xs.slice(Number(from), Number(to));
+}
+
+/**
+ * A new array equal to `xs` except that element `index` is `value`.
+ * Requires `0n <= index && index < len(xs)`.
+ */
+export function withAt<T>(xs: ReadonlyArray<T>, index: bigint, value: T): ReadonlyArray<T> {
+  inRange("withAt", index >= 0n && index < BigInt(xs.length), `index ${index} is out of range for length ${xs.length}`);
+  const out = [...xs];
+  out[Number(index)] = value;
+  return out;
+}
+
 /**
  * Logical implication (`p ==> q`), equivalent to `!p || q`.
  */

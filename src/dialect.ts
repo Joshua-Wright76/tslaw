@@ -140,10 +140,30 @@ export function isTslawRuntimeFile(fileName: string): boolean {
   return result;
 }
 
+/** Runtime helpers on arrays, with the number of arguments each takes. */
+export const ARRAY_HELPERS = {
+  len: 1,
+  at: 2,
+  append: 2,
+  concat: 2,
+  slice: 3,
+  withAt: 3,
+} as const;
+export type ArrayHelper = keyof typeof ARRAY_HELPERS;
+export const isArrayHelper = (name: string): name is ArrayHelper =>
+  Object.prototype.hasOwnProperty.call(ARRAY_HELPERS, name);
+
 export type CalleeRef =
   | {
       readonly kind: "runtime";
-      readonly helper: "law" | "implies" | "requires" | "ensures" | "decreases" | "invariant";
+      readonly helper:
+        | "law"
+        | "implies"
+        | "requires"
+        | "ensures"
+        | "decreases"
+        | "invariant"
+        | ArrayHelper;
     }
   | { readonly kind: "function"; readonly decl: ts.FunctionDeclaration }
   | { readonly kind: "other" };
@@ -166,7 +186,8 @@ export function resolveCallee(checker: ts.TypeChecker, ident: ts.Identifier): Ca
       name === "requires" ||
       name === "ensures" ||
       name === "decreases" ||
-      name === "invariant") &&
+      name === "invariant" ||
+      isArrayHelper(name)) &&
     isTslawRuntimeFile(decl.getSourceFile().fileName)
   ) {
     return { kind: "runtime", helper: name };
@@ -205,6 +226,7 @@ const CHECK_FLAGS_READONLY = 1 << 3;
 export function vTypeKey(t: VType): string {
   if (t.kind === "bigint") return "Int";
   if (t.kind === "boolean") return "Bool";
+  if (t.kind === "array") return `[${vTypeKey(t.element)}]`;
   return `{${t.fields.map((f) => `${f.name}:${vTypeKey(f.type)}`).join(",")}}`;
 }
 
@@ -286,11 +308,25 @@ export function resolveVType(
     if (seen.has(type)) {
       return { ok: false, reason: "recursive object types are not supported" };
     }
-    if (checker.isArrayType(type) || checker.isTupleType(type)) {
+    if (checker.isTupleType(type)) {
       return {
         ok: false,
-        reason: `array/tuple type \`${checker.typeToString(type)}\` is not supported in tslaw v0.1`,
+        reason: `tuple type \`${checker.typeToString(type)}\` is not supported; use a record or an array`,
       };
+    }
+    if (checker.isArrayType(type)) {
+      // `T[]` and `readonly T[]` are the same to verified code, which cannot mutate either.
+      const element = checker.getTypeArguments(type as ts.TypeReference)[0];
+      if (!element) return { ok: false, reason: "array type without an element type" };
+      if (element.getFlags() & ts.TypeFlags.Never) {
+        return {
+          ok: false,
+          reason: "cannot tell the element type of this array; give it a type annotation",
+        };
+      }
+      const resolved = resolveVType(checker, element, new Set(seen), declared);
+      if (!resolved.ok) return { ok: false, reason: `array element: ${resolved.reason}` };
+      return { ok: true, type: { kind: "array", element: resolved.type } };
     }
     if (type.getCallSignatures().length > 0) {
       return { ok: false, reason: "higher-order function values are not supported" };
@@ -622,13 +658,11 @@ export function analyzeDialect(
         ) {
           const lt = resolveVType(checker, checker.getTypeAtLocation(expr.left));
           const rt = resolveVType(checker, checker.getTypeAtLocation(expr.right));
-          if (
-            (lt.ok && lt.type.kind === "record") ||
-            (rt.ok && rt.type.kind === "record")
-          ) {
+          const byIdentity = (k: string): boolean => k === "record" || k === "array";
+          if ((lt.ok && byIdentity(lt.type.kind)) || (rt.ok && byIdentity(rt.type.kind))) {
             addError(
               "LAW015",
-              "Direct `===`/`!==` on records is forbidden (JS compares object identity, not structure); compare fields explicitly",
+              "Direct `===`/`!==` on records and arrays is forbidden (JS compares object identity, not contents); compare fields or elements explicitly",
               expr,
             );
           }
@@ -654,10 +688,30 @@ export function analyzeDialect(
         if (!objType.ok || objType.type.kind !== "record") {
           addError(
             "LAW016",
-            "Property access is only allowed on verified `readonly` records",
+            objType.ok && objType.type.kind === "array"
+              ? "Array properties and methods are not available in verified modules; use `len`, `at`, `append`, `concat`, `slice`, `withAt` from the tslaw runtime"
+              : "Property access is only allowed on verified `readonly` records",
             expr,
           );
         }
+        return;
+      }
+      if (ts.isArrayLiteralExpression(expr)) {
+        for (const el of expr.elements) {
+          if (ts.isSpreadElement(el) || ts.isOmittedExpression(el)) {
+            addError("LAW039", "Spread and holes in array literals are not supported; use `concat`", el);
+            continue;
+          }
+          checkExpr(el, scope);
+        }
+        return;
+      }
+      if (ts.isElementAccessExpression(expr)) {
+        addError(
+          "LAW039",
+          "`xs[i]` is not supported (it is `undefined` out of range, and indexes with `number`); use `at(xs, i)` with a `bigint` index",
+          expr,
+        );
         return;
       }
       if (ts.isObjectLiteralExpression(expr)) {
@@ -690,6 +744,24 @@ export function analyzeDialect(
         if (callee.kind === "runtime" && callee.helper === "implies") {
           if (expr.arguments.length !== 2) {
             addError("LAW018", "`implies` requires exactly 2 arguments", expr);
+          }
+          for (const arg of expr.arguments) checkExpr(arg, scope);
+          return;
+        }
+        if (callee.kind === "runtime" && isArrayHelper(callee.helper)) {
+          const arity = ARRAY_HELPERS[callee.helper];
+          const first = expr.arguments[0];
+          if (expr.arguments.length !== arity || !first) {
+            addError("LAW039", `\`${callee.helper}\` takes exactly ${arity} argument(s)`, expr);
+          } else {
+            const t = resolveVType(checker, checker.getTypeAtLocation(first));
+            if (!t.ok || t.type.kind !== "array") {
+              addError(
+                "LAW039",
+                `The first argument of \`${callee.helper}\` must be an array of a supported, known element type${t.ok ? "" : ` (${t.reason})`}`,
+                first,
+              );
+            }
           }
           for (const arg of expr.arguments) checkExpr(arg, scope);
           return;
