@@ -138,7 +138,21 @@ describe("recursion", () => {
     const at = (code: string): number[] =>
       diags.filter((d) => d.code === code).map((d) => d.location!.line).sort((a, b) => a - b);
     expect(at("LAW032")).toEqual([5, 14, 18]); // noMeasure, pong, late (its measure was rejected)
-    expect(at("LAW037")).toEqual([20, 24]); // misplaced `decreases`; recursion inside `requires`
+    // Misplaced `decreases`; recursion inside `requires`; a measure on a non-recursive function
+    // (it would never be checked, but its argument runs).
+    expect(at("LAW037")).toEqual([20, 24, 31]);
+  });
+
+  it("rejects verified modules that import each other", async () => {
+    // Otherwise a recursion that spans the two files is invisible to both analyses.
+    for (const file of ["cycle-a.law.ts", "cycle-b.ts"]) {
+      const report = await verifyFiles([`${DIR}/${file}`]);
+      expect(report.ok).toBe(false);
+      expect(report.files[0]!.laws).toEqual([]);
+      const cycle = report.files[0]!.diagnostics.filter((d) => /import each other in a cycle/.test(d.message));
+      expect(cycle.length, file).toBeGreaterThan(0);
+      expect(cycle[0]!.code).toBe("LAW001");
+    }
   });
 
   it("does nothing at runtime", () => {

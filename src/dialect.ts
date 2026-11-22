@@ -382,6 +382,9 @@ export function resolveVType(
   };
 }
 
+/** Analyses that have started but not finished (their module is somewhere up the import chain). */
+const IN_PROGRESS = new WeakSet<DialectAnalysis>();
+
 /**
  * Analyze a TypeScript source file against the tslaw sound pure subset.
  */
@@ -416,6 +419,7 @@ export function analyzeDialect(
     ensures: ensuresList,
   };
   visited.set(sf.fileName, stub);
+  IN_PROGRESS.add(stub);
 
   const addError = (code: string, message: string, node: ts.Node): void => {
     diagnostics.push({
@@ -500,6 +504,16 @@ export function analyzeDialect(
         if (!analyzedDeps.has(depSf.fileName)) {
           analyzedDeps.add(depSf.fileName);
           const depAnalysis = analyzeDialect(depSf, checker, visited);
+          if (IN_PROGRESS.has(depAnalysis)) {
+            // Its analysis is not finished, so its functions (and any recursion through them)
+            // cannot be seen from here.
+            addError(
+              "LAW001",
+              `Verified modules may not import each other in a cycle (${sf.fileName} and ${depSf.fileName}); put mutually recursive functions in one module`,
+              elem,
+            );
+            continue;
+          }
           diagnostics.push(...depAnalysis.diagnostics);
           for (const depFn of depAnalysis.functions) {
             importedFunctions.set(depFn.decl, depFn);
@@ -1332,7 +1346,20 @@ export function analyzeDialect(
     const recursive = members.length > 1 || members[0]!.calls.has(members[0]!.decl);
     const scc = nextScc++;
     for (const m of members) ordered.push({ ...m, scc, recursive });
-    if (!recursive) return;
+    if (!recursive) {
+      // A measure is only checked for recursive functions, but JavaScript evaluates its
+      // arguments on every call, so an unchecked one could hide a call that goes wrong.
+      const only = members[0]!;
+      if (only.decreases.length > 0 && only.decl.getSourceFile() === sf) {
+        diagnostics.push({
+          stage: "dialect",
+          code: "LAW037",
+          message: `\`${only.name}\` is not recursive, so it cannot have a \`decreases(...)\` measure; remove it`,
+          location: only.location,
+        });
+      }
+      return;
+    }
 
     // Errors in imported modules were already reported with those modules' diagnostics.
     const names = members.map((m) => `\`${m.name}\``).join(", ");
@@ -1393,6 +1420,7 @@ export function analyzeDialect(
     laws,
     ensures: ensuresList,
   };
+  IN_PROGRESS.delete(stub);
   visited.set(sf.fileName, result);
   return result;
 }

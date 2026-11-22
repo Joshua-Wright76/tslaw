@@ -111,7 +111,10 @@ describe("fuzz: the SMT model agrees with JavaScript on generated programs", () 
         // Now and then the generator writes a comparison that TypeScript rejects because an
         // enclosing `if (x === 5n)` has narrowed `x` to that literal ("no overlap"). Such a
         // module is not in the subset, so it says nothing about the translation; skip it.
-        if (file.diagnostics.length > 0 && file.diagnostics.every((d) => d.code === "TS2367")) {
+        // Very rarely it also nests expressions deeper than the TypeScript compiler can take.
+        const artifact = (d: { code: string; message: string }): boolean =>
+          d.code === "TS2367" || (d.code === "LAW000" && /nested too deeply/.test(d.message));
+        if (file.diagnostics.length > 0 && file.diagnostics.every(artifact)) {
           rejectedByTypeScript++;
           expectedProved -= FUNCTIONS_PER_MODULE * INPUTS_PER_FUNCTION;
           expectedDisproved -= FUNCTIONS_PER_MODULE * INPUTS_PER_FUNCTION;

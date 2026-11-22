@@ -59,7 +59,60 @@ export async function verifyFiles(
   let confirmed = 0;
 
   const program = ts.createProgram(absPaths, VERIFIER_COMPILER_OPTIONS);
-  const checker = program.getTypeChecker();
+  let checker: ts.TypeChecker;
+  try {
+    checker = program.getTypeChecker();
+  } catch (err) {
+    // The TypeScript compiler recurses over expressions and can exhaust the stack on extremely
+    // deep ones (machine-generated code, usually). It reads every file up front, so one such
+    // file would take the whole run down: check the files one at a time instead.
+    if (!(err instanceof RangeError)) throw err;
+    if (absPaths.length === 1) {
+      return {
+        ok: false,
+        files: [
+          {
+            file: absPaths[0]!,
+            verifiedDirective: false,
+            diagnostics: [
+              {
+                stage: "typecheck",
+                code: "LAW000",
+                message: `TypeScript could not process this file or one it imports (${err.message}); an expression is probably nested too deeply`,
+              },
+            ],
+            laws: [],
+          },
+        ],
+        summary: {
+          totalFiles: 1,
+          verifiedFiles: 0,
+          proved: 0,
+          disproved: 0,
+          unknown: 0,
+          errors: 1,
+          ...(options.crossCheck ? { confirmed: 0 } : {}),
+        },
+      };
+    }
+    const parts: VerifyReport[] = [];
+    for (const p of absPaths) parts.push(await verifyFiles([p], options));
+    const sum = (pick: (s: VerifyReport["summary"]) => number): number =>
+      parts.reduce((acc, r) => acc + pick(r.summary), 0);
+    return {
+      ok: parts.every((r) => r.ok),
+      files: parts.flatMap((r) => r.files),
+      summary: {
+        totalFiles: absPaths.length,
+        verifiedFiles: sum((s) => s.verifiedFiles),
+        proved: sum((s) => s.proved),
+        disproved: sum((s) => s.disproved),
+        unknown: sum((s) => s.unknown),
+        errors: sum((s) => s.errors),
+        ...(options.crossCheck ? { confirmed: sum((s) => s.confirmed ?? 0) } : {}),
+      },
+    };
+  }
 
   const fileResults: FileVerificationResult[] = [];
   let verifiedFiles = 0;
@@ -96,10 +149,31 @@ export async function verifyFiles(
 
     // Stage 1: TypeScript strict typecheck
     // Imported `"use verified";` modules are part of the proof, so they are type-checked too.
-    const tsDiags = [sf, ...verifiedDeps(sf, checker)].flatMap((f) => [
-      ...program.getSyntacticDiagnostics(f),
-      ...program.getSemanticDiagnostics(f),
-    ]);
+    let tsDiags: ts.Diagnostic[];
+    try {
+      tsDiags = [sf, ...verifiedDeps(sf, checker)].flatMap((f) => [
+        ...program.getSyntacticDiagnostics(f),
+        ...program.getSemanticDiagnostics(f),
+      ]);
+    } catch (err) {
+      // The TypeScript compiler recurses over expressions and can exhaust the stack on
+      // extremely deep ones (machine-generated code, usually).
+      if (!(err instanceof RangeError)) throw err;
+      errors++;
+      fileResults.push({
+        file: absPath,
+        verifiedDirective: false,
+        diagnostics: [
+          {
+            stage: "typecheck",
+            code: "LAW000",
+            message: `TypeScript could not process this file or one it imports (${err.message}); an expression is probably nested too deeply`,
+          },
+        ],
+        laws: [],
+      });
+      continue;
+    }
 
     const diagnostics: Diagnostic[] = tsDiags.map((d) => {
       const message = ts.flattenDiagnosticMessageText(d.messageText, "\n");

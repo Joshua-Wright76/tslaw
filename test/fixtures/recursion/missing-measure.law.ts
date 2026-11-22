@@ -26,3 +26,9 @@ export function selfInSpec(n: bigint): bigint {
   decreases(n);
   return n <= 0n ? 0n : selfInSpec(n - 1n);
 }
+
+// Not recursive: the measure would never be checked, yet its argument runs on every call.
+export function plain(n: bigint): bigint {
+  decreases(noMeasure(n));
+  return n;
+}
