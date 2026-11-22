@@ -433,16 +433,25 @@ export function lowerModuleLaws(
       // inferred type can be something no single datatype models (for example a field whose
       // value is a ternary between two record shapes), but each property has an expected type.
       const recDef = registry.getRecord(expected);
-      const args = recDef.fields.map((f) => {
-        for (const prop of expr.properties) {
-          if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === f.name) {
-            return lowerExpr(prop.initializer, env, f.type);
-          }
-          if (ts.isShorthandPropertyAssignment(prop) && prop.name.text === f.name) {
-            return lowerExpr(prop.name, env, f.type);
-          }
+      const expectedByName = new Map(recDef.fields.map((f) => [f.name, f.type]));
+      const values = new Map<string, string>();
+      for (const prop of expr.properties) {
+        if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name)) {
+          const name = prop.name.text;
+          // Lower every property, even extra ones dropped by width subtyping, so calls inside
+          // them still emit their preconditions, termination goals and dependencies.
+          const val = lowerExpr(prop.initializer, env, expectedByName.get(name));
+          if (expectedByName.has(name)) values.set(name, val);
+        } else if (ts.isShorthandPropertyAssignment(prop)) {
+          const name = prop.name.text;
+          const val = lowerExpr(prop.name, env, expectedByName.get(name));
+          if (expectedByName.has(name)) values.set(name, val);
         }
-        throw new Error(`Missing field \`${f.name}\` in object literal`);
+      }
+      const args = recDef.fields.map((f) => {
+        const val = values.get(f.name);
+        if (val === undefined) throw new Error(`Missing field \`${f.name}\` in object literal`);
+        return val;
       });
       return `(${recDef.ctorName} ${args.join(" ")})`;
     }
@@ -478,7 +487,6 @@ export function lowerModuleLaws(
       const operand = lowerExpr(expr.operand, env);
       if (expr.operator === ts.SyntaxKind.MinusToken) return `(- ${operand})`;
       if (expr.operator === ts.SyntaxKind.ExclamationToken) return `(not ${operand})`;
-      if (expr.operator === ts.SyntaxKind.PlusToken) return operand;
     }
     if (ts.isBinaryExpression(expr)) {
       const left = lowerExpr(expr.left, env);
@@ -967,7 +975,7 @@ export function lowerModuleLaws(
     // The result: the assigned variables as one record (or `true` when there are none).
     const stateFields = params
       .filter((p) => assigned.has(p.name))
-      .sort((a, b) => a.name.localeCompare(b.name));
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     const stateType: VType | undefined =
       stateFields.length > 0 ? { kind: "record", fields: stateFields } : undefined;
     const stateDef = stateType ? registry.getRecord(stateType) : undefined;
@@ -1087,6 +1095,7 @@ export function lowerModuleLaws(
       roots: new Set([unit]),
       posts: scope.posts,
       factGoals: scope.goals,
+      opaque: unit,
       ...(scope.facts.length > 0 ? { plain: { defs: [], assumptions: [] } } : {}),
       local,
     };
@@ -1114,7 +1123,6 @@ export function lowerModuleLaws(
           measureNamesHere.map((m) => app(m, paramNames)),
         ),
       ),
-      opaque: unit,
     });
     for (const ob of mergeObligations(trace.obligations)) {
       addCheck(unit, pending.length);

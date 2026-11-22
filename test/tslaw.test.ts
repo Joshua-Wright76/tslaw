@@ -223,4 +223,146 @@ law("clampAdd never exceeds max", (x: bigint, d: bigint, max: bigint) => {
     expect(report.ok).toBe(true);
     expect(report.summary.proved).toBe(1);
   });
+
+  it("rejects unary `+` (which produces IEEE-754 number from boolean)", async () => {
+    const file = writeTempLawFile(
+      "unary-plus.law.ts",
+      `"use verified";
+import { law } from "RUNTIME_PATH";
+export function bad(a: boolean, b: boolean): boolean {
+  return +a + +b === +a;
+}
+law("FALSE: unary plus", (a: boolean, b: boolean) => bad(a, b) === !b);
+`,
+    );
+    const report = await verifyFiles([file]);
+    expect(report.ok).toBe(false);
+    expect(report.summary.proved).toBe(0);
+    expect(report.files[0]!.diagnostics.map((d) => d.code)).toContain("LAW012");
+  });
+
+  it("rejects `__proto__` fields, index signatures, construct signatures, and symbol-keyed fields", async () => {
+    const file = writeTempLawFile(
+      "bad-records.law.ts",
+      `"use verified";
+import { law } from "RUNTIME_PATH";
+interface Proto { readonly __proto__: bigint; }
+interface Idx { readonly a: bigint; readonly [k: string]: bigint; }
+interface Ctor { new(): object; readonly a: bigint; }
+interface Sym { readonly [Symbol.toStringTag]: bigint; readonly a: bigint; }
+export function makeProto(): Proto { return { __proto__: 1n }; }
+export function takeIdx(x: Idx): bigint { return x.a; }
+export function takeCtor(x: Ctor): bigint { return x.a; }
+export function takeSym(x: Sym): bigint { return x.a; }
+law("FALSE: proto", () => makeProto().__proto__ === 1n);
+`,
+    );
+    const report = await verifyFiles([file]);
+    expect(report.ok).toBe(false);
+    expect(report.summary.proved).toBe(0);
+    const msgs = report.files[0]!.diagnostics.map((d) => d.message).join("\n");
+    expect(msgs).toContain("__proto__");
+    expect(msgs).toContain("index signatures");
+    expect(msgs).toContain("constructor types");
+    expect(msgs).toContain("symbol-keyed");
+  });
+
+  it("rejects computed/string keys, non-records, and inherited keys in object destructuring", async () => {
+    const file = writeTempLawFile(
+      "bad-destructure.law.ts",
+      `"use verified";
+import { law } from "RUNTIME_PATH";
+interface Pair { readonly a: bigint; readonly b: bigint; }
+export function strKey(p: Pair): bigint { const { "a": b } = p; return b; }
+export function compKey(p: Pair): bigint { const { ["a"]: b } = p; return b; }
+export function arrDestr(xs: readonly bigint[]): bigint { const { length } = xs; return 1n; }
+export function ctorDestr(p: Pair): bigint { const { constructor } = p; return 1n; }
+law("FALSE: strKey", (p: Pair) => strKey(p) === p.b);
+`,
+    );
+    const report = await verifyFiles([file]);
+    expect(report.ok).toBe(false);
+    expect(report.summary.proved).toBe(0);
+    const codes = report.files[0]!.diagnostics.map((d) => d.code);
+    expect(codes).toContain("LAW022");
+    expect(codes).toContain("LAW016");
+  });
+
+  it("rejects side-effect imports, default+named imports, and re-exports through unverified barrels", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tslaw-imports-"));
+    tmpDirs.push(dir);
+    const runtimePath = path.resolve("src/runtime.ts").replace(/\.ts$/, ".js");
+    fs.writeFileSync(path.join(dir, "side.ts"), `export const x = 1;\n`);
+    fs.writeFileSync(
+      path.join(dir, "target.ts"),
+      `"use verified";\nexport function bad(x: bigint): bigint { const broken: bigint = true; return x; }\n`,
+    );
+    fs.writeFileSync(path.join(dir, "barrel.ts"), `export { bad } from "./target.js";\n`);
+    fs.writeFileSync(path.join(dir, "rtwrap.ts"), `export default 1;\nexport { law } from "${runtimePath}";\n`);
+
+    const sideFile = path.join(dir, "a.law.ts");
+    fs.writeFileSync(sideFile, `"use verified";\nimport "./side.js";\nimport { law } from "${runtimePath}";\nlaw("t", () => true);\n`);
+    const barrelFile = path.join(dir, "b.law.ts");
+    fs.writeFileSync(barrelFile, `"use verified";\nimport { law } from "${runtimePath}";\nimport { bad } from "./barrel.js";\nlaw("t", (x: bigint) => bad(x) === x);\n`);
+    const defFile = path.join(dir, "c.law.ts");
+    fs.writeFileSync(defFile, `"use verified";\nimport d, { law } from "./rtwrap.js";\nlaw("t", () => true);\n`);
+
+    const report = await verifyFiles([sideFile, barrelFile, defFile]);
+    expect(report.ok).toBe(false);
+    expect(report.summary.proved).toBe(0);
+    for (const f of report.files) {
+      expect(f.diagnostics.map((d) => d.code)).toContain("LAW001");
+    }
+  });
+
+  it("rejects `this` parameters and avoids record type key collisions on punctuation", async () => {
+    const thisFile = writeTempLawFile(
+      "this-param.law.ts",
+      `"use verified";
+import { law } from "RUNTIME_PATH";
+law("this", function(this: bigint, x: bigint) { return x === x; });
+`,
+    );
+    const r1 = await verifyFiles([thisFile]);
+    expect(r1.ok).toBe(false);
+    expect(r1.files[0]!.diagnostics.map((d) => d.code)).toContain("LAW005");
+
+    const keyFile = writeTempLawFile(
+      "vtypekey.law.ts",
+      `"use verified";
+import { law } from "RUNTIME_PATH";
+interface A { readonly "x:Int,y": bigint; }
+interface B { readonly x: bigint; readonly y: bigint; }
+export function takeA(_a: A): bigint { return 1n; }
+export function takeB(b: B): bigint { return b.x + b.y; }
+law("distinct records", (a: A, b: B) => takeA(a) + takeB(b) === 1n + b.x + b.y);
+`,
+    );
+    const r2 = await verifyFiles([keyFile]);
+    expect(r2.ok).toBe(true);
+    expect(r2.summary.proved).toBe(1);
+  });
+
+  it("still reports disproved loop invariants when the loop's termination fails", async () => {
+    const file = writeTempLawFile(
+      "bad-loop.law.ts",
+      `"use verified";
+import { decreases, invariant } from "RUNTIME_PATH";
+export function bad(n: bigint): bigint {
+  let i = n;
+  while (i > 0n) {
+    invariant(i >= 0n && i <= 10n);
+    decreases(i);
+    i += 1n;
+  }
+  return i;
+}
+`,
+    );
+    const report = await verifyFiles([file]);
+    expect(report.ok).toBe(false);
+    const byName = new Map(report.files[0]!.laws.map((l) => [l.name, l.status]));
+    expect(byName.get("termination of the loop at line 5")).toBe("disproved");
+    expect(byName.get("invariant of the loop at line 5: kept by the body")).toBe("disproved");
+  });
 });

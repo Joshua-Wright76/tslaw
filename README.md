@@ -291,7 +291,7 @@ Codes starting with `TS` come from the TypeScript compiler. The rest are tslaw's
 | Code | Meaning |
 |---|---|
 | `LAW000` | File not found or unreadable. |
-| `LAW001` | Disallowed import: default or namespace import, a value from an unverified module, `law`/`implies` not from the tslaw runtime, or two verified modules importing each other. |
+| `LAW001` | Disallowed import: side-effect, default, or namespace import, a value from or re-exported through an unverified module, `law`/`implies` not from the tslaw runtime, or two verified modules importing each other. |
 | `LAW002` | Anonymous top-level function. |
 | `LAW003` | `async`, generator, generic, or body-less function. |
 | `LAW004` | Function return type is missing or not a supported type. |
@@ -299,7 +299,7 @@ Codes starting with `TS` come from the TypeScript compiler. The rest are tslaw's
 | `LAW006` | Parameter has an unsupported type (including literal types such as `5n` or `true`). |
 | `LAW010` | `number` literal; write a `bigint` literal such as `1n`. |
 | `LAW011` | Identifier is not a parameter or local `const` (globals are forbidden). |
-| `LAW012` | Mutating or bitwise unary operator (`++`, `--`, `~`). |
+| `LAW012` | Disallowed unary operator (`+`, `++`, `--`, `~`; only `-` and `!` are allowed). |
 | `LAW013` | Division or modulo (not yet supported). |
 | `LAW014` | Any other unsupported binary operator. |
 | `LAW015` | `===`/`!==` used on records or arrays. |

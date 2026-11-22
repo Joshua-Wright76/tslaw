@@ -5,6 +5,8 @@
  * `node dist/cli.js guard test/fixtures/guard/bank.ts test/fixtures/guard/limits.ts test/fixtures/guard/basket.ts`.
  */
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { generateGuards } from "../src/guard.js";
@@ -122,5 +124,49 @@ describe("tslaw guard", () => {
     const [r] = generateGuards(["src/runtime.ts"]);
     expect(r!.source).toBeUndefined();
     expect(r!.diagnostics[0]!.code).toBe("LAW040");
+  });
+
+  it("rejects arrays passed where a record is expected", () => {
+    expect(() => untyped["isOpen"]!([])).toThrow(/isOpen: acc must be an object/);
+  });
+
+  it("avoids helper name collisions, escapes weird field names, and type-checks verified dependencies", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tslaw-guard-edge-"));
+    try {
+      const runtimePath = path.resolve("src/runtime.ts").replace(/\.ts$/, ".js");
+      const tricky = path.join(dir, "tricky.ts");
+      fs.writeFileSync(
+        tricky,
+        `"use verified";
+import { requires } from ${JSON.stringify(runtimePath)};
+interface Weird { readonly "a\`\${1}": bigint; }
+export function $fail(args: bigint, $verified: bigint, w: Weird): bigint {
+  requires(args > 0n && $verified > 0n);
+  return args + $verified;
+}
+`,
+      );
+      const [g] = generateGuards([tricky]);
+      expect(g!.diagnostics).toEqual([]);
+      expect(g!.source).toBeDefined();
+      fs.writeFileSync(g!.outFile, g!.source!);
+      const program = ts.createProgram([g!.outFile], VERIFIER_COMPILER_OPTIONS);
+      const diags = ts.getPreEmitDiagnostics(program).map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n"));
+      expect(diags).toEqual([]);
+
+      // Imported verified module with a type error must fail guard generation.
+      const depBad = path.join(dir, "depBad.ts");
+      const mainBad = path.join(dir, "mainBad.ts");
+      fs.writeFileSync(depBad, `"use verified";\nexport function h(x: bigint): bigint { const b: bigint = true; return x; }\n`);
+      fs.writeFileSync(
+        mainBad,
+        `"use verified";\nimport { requires } from ${JSON.stringify(runtimePath)};\nimport { h } from "./depBad.js";\nexport function f(x: bigint): bigint { requires(h(x) > 0n); return x; }\n`,
+      );
+      const [badRes] = generateGuards([mainBad]);
+      expect(badRes!.source).toBeUndefined();
+      expect(badRes!.diagnostics.map((d) => d.code)).toContain("TS2322");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

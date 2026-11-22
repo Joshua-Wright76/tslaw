@@ -31,7 +31,7 @@ function $len<T>(xs: ReadonlyArray<T>): bigint {
   return BigInt(xs.length);
 }
 function $record1(fn: string, at: string, v: unknown): { readonly "price": bigint; readonly "qty": bigint } {
-  if (typeof v !== "object" || v === null) $fail(fn, `${at} must be an object, got ${$show(v)}`);
+  if (typeof v !== "object" || v === null || Array.isArray(v)) $fail(fn, `${at} must be an object, got ${$show(v)}`);
   const o = v as Record<string, unknown>;
   return Object.freeze({
     "price": $bigint(fn, `${at}.price`, o["price"]),

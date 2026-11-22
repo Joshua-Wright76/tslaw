@@ -29,7 +29,7 @@ export const VERIFIER_COMPILER_OPTIONS: ts.CompilerOptions = {
 };
 
 /** Transitive `"use verified";` source modules imported by `root` (excluding `root`). */
-function verifiedDeps(root: ts.SourceFile, checker: ts.TypeChecker): ts.SourceFile[] {
+export function verifiedDeps(root: ts.SourceFile, checker: ts.TypeChecker): ts.SourceFile[] {
   const seen = new Set<ts.SourceFile>([root]);
   const out: ts.SourceFile[] = [];
   const visit = (sf: ts.SourceFile): void => {
@@ -311,7 +311,7 @@ export async function verifyFiles(
         // postconditions and invariants; if that is not enough, with their definitions.
         if (lowered.abstract) {
           const quick = await solve({ ...lowered, smtScript: lowered.abstract.smtScript });
-          if (quick.status === "proved") {
+          if (quick.status === "proved" || quick.status === "error") {
             lawResults[idx] = quick;
             dependsOn[idx] = lowered.abstract.dependsOn;
             continue;
@@ -350,7 +350,12 @@ export async function verifyFiles(
               : undefined;
         if (failed === undefined) continue;
         changed = true;
-        if (res.status === "proved" && lowered.plain && !triedPlain.has(idx)) {
+        if (
+          res.status === "proved" &&
+          lowered.plain &&
+          !triedPlain.has(idx) &&
+          !lowered.foundations.includes(failed)
+        ) {
           triedPlain.add(idx);
           const retry = await solve({ ...lowered, smtScript: lowered.plain.smtScript });
           if (retry.status === "proved" || retry.status === "disproved") {

@@ -37,7 +37,7 @@ block    ::= const x = e; block
 branch   ::= { block } | return e; | x = e; | if-statement
 
 e        ::= x | n | true | false                     (n is a bigint literal)
-           | -e | +e | !e
+           | -e | !e
            | e + e | e - e | e * e
            | e < e | e <= e | e > e | e >= e
            | e === e | e !== e                        (operands bigint or boolean)
@@ -199,7 +199,7 @@ Positions with an expected type are: function arguments, `return` expressions, a
 T[x]G            = G(x)
 T[n]G            = n            (decimal numeral; hex, octal, binary and separators normalized)
 T[true]G         = true         T[false]G = false
-T[-e]G           = (- T[e]G)    T[+e]G = T[e]G        T[!e]G = (not T[e]G)
+T[-e]G           = (- T[e]G)    T[!e]G = (not T[e]G)
 T[e1 + e2]G      = (+ T[e1]G T[e2]G)                  likewise - and *
 T[e1 < e2]G      = (< T[e1]G T[e2]G)                  likewise <= > >=
 T[e1 === e2]G    = (= T[e1]G T[e2]G)

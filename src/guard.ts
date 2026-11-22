@@ -21,7 +21,7 @@ import {
   type ArrayHelper,
 } from "./dialect.js";
 import type { Diagnostic, VType } from "./types.js";
-import { VERIFIER_COMPILER_OPTIONS } from "./verify.js";
+import { VERIFIER_COMPILER_OPTIONS, verifiedDeps } from "./verify.js";
 
 export interface GuardResult {
   readonly file: string;
@@ -36,6 +36,12 @@ export interface GuardResult {
 
 const key = (name: string): string => JSON.stringify(name);
 
+function fieldPath(name: string): string {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name)
+    ? `\`\${at}.${name}\``
+    : `at + ${key(`[${JSON.stringify(name)}]`)}`;
+}
+
 function typeText(t: VType): string {
   if (t.kind === "bigint" || t.kind === "boolean") return t.kind;
   if (t.kind === "array") return `ReadonlyArray<${typeText(t.element)}>`;
@@ -43,39 +49,47 @@ function typeText(t: VType): string {
 }
 
 /** Local copies of the runtime's array helpers, for `requires` conditions that use them. */
-const ARRAY_HELPER_SOURCE: Record<ArrayHelper, string> = {
-  len: [`function $len<T>(xs: ReadonlyArray<T>): bigint {`, `  return BigInt(xs.length);`, `}`].join("\n"),
-  at: [
-    `function $at<T>(xs: ReadonlyArray<T>, index: bigint): T {`,
-    `  if (index < 0n || index >= BigInt(xs.length)) throw new RangeError(\`at: index \${index} is out of range for length \${xs.length}\`);`,
-    `  return xs[Number(index)] as T;`,
-    `}`,
-  ].join("\n"),
-  append: [
-    `function $append<T>(xs: ReadonlyArray<T>, x: T): ReadonlyArray<T> {`,
-    `  return [...xs, x];`,
-    `}`,
-  ].join("\n"),
-  concat: [
-    `function $concat<T>(xs: ReadonlyArray<T>, ys: ReadonlyArray<T>): ReadonlyArray<T> {`,
-    `  return [...xs, ...ys];`,
-    `}`,
-  ].join("\n"),
-  slice: [
-    `function $slice<T>(xs: ReadonlyArray<T>, from: bigint, to: bigint): ReadonlyArray<T> {`,
-    `  if (from < 0n || from > to || to > BigInt(xs.length)) throw new RangeError(\`slice: range \${from}..\${to} is out of range for length \${xs.length}\`);`,
-    `  return xs.slice(Number(from), Number(to));`,
-    `}`,
-  ].join("\n"),
-  withAt: [
-    `function $withAt<T>(xs: ReadonlyArray<T>, index: bigint, value: T): ReadonlyArray<T> {`,
-    `  if (index < 0n || index >= BigInt(xs.length)) throw new RangeError(\`withAt: index \${index} is out of range for length \${xs.length}\`);`,
-    `  const out = [...xs];`,
-    `  out[Number(index)] = value;`,
-    `  return out;`,
-    `}`,
-  ].join("\n"),
-};
+function arrayHelperSource(p: string, helper: ArrayHelper): string {
+  switch (helper) {
+    case "len":
+      return [`function ${p}len<T>(xs: ReadonlyArray<T>): bigint {`, `  return BigInt(xs.length);`, `}`].join("\n");
+    case "at":
+      return [
+        `function ${p}at<T>(xs: ReadonlyArray<T>, index: bigint): T {`,
+        `  if (index < 0n || index >= BigInt(xs.length)) throw new RangeError(\`at: index \${index} is out of range for length \${xs.length}\`);`,
+        `  return xs[Number(index)] as T;`,
+        `}`,
+      ].join("\n");
+    case "append":
+      return [
+        `function ${p}append<T>(xs: ReadonlyArray<T>, x: T): ReadonlyArray<T> {`,
+        `  return [...xs, x];`,
+        `}`,
+      ].join("\n");
+    case "concat":
+      return [
+        `function ${p}concat<T>(xs: ReadonlyArray<T>, ys: ReadonlyArray<T>): ReadonlyArray<T> {`,
+        `  return [...xs, ...ys];`,
+        `}`,
+      ].join("\n");
+    case "slice":
+      return [
+        `function ${p}slice<T>(xs: ReadonlyArray<T>, from: bigint, to: bigint): ReadonlyArray<T> {`,
+        `  if (from < 0n || from > to || to > BigInt(xs.length)) throw new RangeError(\`slice: range \${from}..\${to} is out of range for length \${xs.length}\`);`,
+        `  return xs.slice(Number(from), Number(to));`,
+        `}`,
+      ].join("\n");
+    case "withAt":
+      return [
+        `function ${p}withAt<T>(xs: ReadonlyArray<T>, index: bigint, value: T): ReadonlyArray<T> {`,
+        `  if (index < 0n || index >= BigInt(xs.length)) throw new RangeError(\`withAt: index \${index} is out of range for length \${xs.length}\`);`,
+        `  const out = [...xs];`,
+        `  out[Number(index)] = value;`,
+        `  return out;`,
+        `}`,
+      ].join("\n");
+  }
+}
 
 function isExported(decl: ts.FunctionDeclaration): boolean {
   const mods = decl.modifiers ?? [];
@@ -88,7 +102,31 @@ function isExported(decl: ts.FunctionDeclaration): boolean {
 export function generateGuards(filePaths: ReadonlyArray<string>): GuardResult[] {
   const absPaths = filePaths.map((p) => path.resolve(p));
   const program = ts.createProgram(absPaths, VERIFIER_COMPILER_OPTIONS);
-  const checker = program.getTypeChecker();
+  let checker: ts.TypeChecker;
+  try {
+    checker = program.getTypeChecker();
+  } catch (err) {
+    if (!(err instanceof RangeError)) throw err;
+    if (absPaths.length === 1) {
+      const file = absPaths[0]!;
+      const parsed = path.parse(file);
+      return [
+        {
+          file,
+          outFile: path.join(parsed.dir, `${parsed.name}.guarded.ts`),
+          diagnostics: [
+            {
+              stage: "typecheck",
+              code: "LAW000",
+              message: `TypeScript could not process this file or one it imports (${err.message}); an expression is probably nested too deeply`,
+            },
+          ],
+          functions: [],
+        },
+      ];
+    }
+    return absPaths.flatMap((p) => generateGuards([p]));
+  }
 
   return absPaths.map((file): GuardResult => {
     const parsed = path.parse(file);
@@ -103,7 +141,27 @@ export function generateGuards(filePaths: ReadonlyArray<string>): GuardResult[] 
     const sf = program.getSourceFile(file);
     if (!sf) return fail("LAW000", `File not found or unreadable: ${file}`);
 
-    const tsDiags = [...program.getSyntacticDiagnostics(sf), ...program.getSemanticDiagnostics(sf)];
+    let tsDiags: ts.Diagnostic[];
+    try {
+      tsDiags = [sf, ...verifiedDeps(sf, checker)].flatMap((f) => [
+        ...program.getSyntacticDiagnostics(f),
+        ...program.getSemanticDiagnostics(f),
+      ]);
+    } catch (err) {
+      if (!(err instanceof RangeError)) throw err;
+      return {
+        file,
+        outFile,
+        functions: [],
+        diagnostics: [
+          {
+            stage: "typecheck",
+            code: "LAW000",
+            message: `TypeScript could not process this file or one it imports (${err.message}); an expression is probably nested too deeply`,
+          },
+        ],
+      };
+    }
     if (tsDiags.length > 0) {
       return {
         file,
@@ -130,23 +188,38 @@ export function generateGuards(filePaths: ReadonlyArray<string>): GuardResult[] 
     );
     if (exported.length === 0) return { file, outFile, diagnostics: [], functions: [] };
 
+    // Choose a prefix for generated helper names that cannot collide with any exported function
+    // name, parameter name, or identifier inside a `requires` condition.
+    const usedNames = new Set<string>();
+    const collectNames = (node: ts.Node): void => {
+      if (ts.isIdentifier(node)) usedNames.add(node.text);
+      ts.forEachChild(node, collectNames);
+    };
+    for (const fn of exported) {
+      usedNames.add(fn.name);
+      for (const param of fn.params) usedNames.add(param.name);
+      for (const req of fn.requires) collectNames(req);
+    }
+    let P = "$";
+    while ([...usedNames].some((n) => n.startsWith(P))) P += "_";
+
     // One checker function per distinct type.
     const checkers = new Map<string, string>();
     const checkerDefs: string[] = [];
     const checkerFor = (t: VType): string => {
-      if (t.kind === "bigint") return "$bigint";
-      if (t.kind === "boolean") return "$boolean";
+      if (t.kind === "bigint") return `${P}bigint`;
+      if (t.kind === "boolean") return `${P}boolean`;
       const k = vTypeKey(t);
       const existing = checkers.get(k);
       if (existing) return existing;
       if (t.kind === "array") {
-        const name = `$array${checkers.size}`;
+        const name = `${P}array${checkers.size}`;
         checkers.set(k, name);
         const element = checkerFor(t.element);
         checkerDefs.push(
           [
             `function ${name}(fn: string, at: string, v: unknown): ${typeText(t)} {`,
-            `  if (!Array.isArray(v)) $fail(fn, \`\${at} must be an array, got \${$show(v)}\`);`,
+            `  if (!Array.isArray(v)) ${P}fail(fn, \`\${at} must be an array, got \${${P}show(v)}\`);`,
             `  const items: ReadonlyArray<unknown> = v;`,
             `  const out: Array<${typeText(t.element)}> = [];`,
             `  for (let i = 0; i < items.length; i++) out.push(${element}(fn, \`\${at}[\${i}]\`, items[i]));`,
@@ -156,15 +229,15 @@ export function generateGuards(filePaths: ReadonlyArray<string>): GuardResult[] 
         );
         return name;
       }
-      const name = `$record${checkers.size}`;
+      const name = `${P}record${checkers.size}`;
       checkers.set(k, name);
       const fields = t.fields.map(
-        (f) => `    ${key(f.name)}: ${checkerFor(f.type)}(fn, \`\${at}.${f.name}\`, o[${key(f.name)}]),`,
+        (f) => `    ${key(f.name)}: ${checkerFor(f.type)}(fn, ${fieldPath(f.name)}, o[${key(f.name)}]),`,
       );
       checkerDefs.push(
         [
           `function ${name}(fn: string, at: string, v: unknown): ${typeText(t)} {`,
-          `  if (typeof v !== "object" || v === null) $fail(fn, \`\${at} must be an object, got \${$show(v)}\`);`,
+          `  if (typeof v !== "object" || v === null || Array.isArray(v)) ${P}fail(fn, \`\${at} must be an object, got \${${P}show(v)}\`);`,
           `  const o = v as Record<string, unknown>;`,
           `  return Object.freeze({`,
           ...fields,
@@ -190,10 +263,10 @@ export function generateGuards(filePaths: ReadonlyArray<string>): GuardResult[] 
           let text: string | undefined;
           if (callee.kind === "runtime" && callee.helper === "implies") {
             usesImplies = true;
-            text = "$implies";
+            text = `${P}implies`;
           } else if (callee.kind === "runtime" && isArrayHelper(callee.helper)) {
             usedArrayHelpers.add(callee.helper);
-            text = `$${callee.helper}`;
+            text = `${P}${callee.helper}`;
           } else if (callee.kind === "function" && callee.decl.name) {
             if (!isExported(callee.decl)) {
               problems.push({
@@ -202,11 +275,11 @@ export function generateGuards(filePaths: ReadonlyArray<string>): GuardResult[] 
                 message: `Cannot generate a guard for \`${fnName}\`: its \`requires\` calls \`${callee.decl.name.text}\`, which is not exported`,
               });
             } else if (callee.decl.getSourceFile() === sf) {
-              text = `$verified.${callee.decl.name.text}`;
+              text = `${P}verified.${callee.decl.name.text}`;
             } else {
               let alias = depImports.get(callee.decl);
               if (!alias) {
-                alias = `$dep${depImports.size}`;
+                alias = `${P}dep${depImports.size}`;
                 depImports.set(callee.decl, alias);
               }
               text = alias;
@@ -228,23 +301,24 @@ export function generateGuards(filePaths: ReadonlyArray<string>): GuardResult[] 
     };
 
     const wrappers = exported.map((fn) => {
+      const rawArgs = fn.params.some((param) => param.name === "args") ? `${P}in` : "args";
       const lines: string[] = [
         `export function ${fn.name}(`,
-        `  ...args: Parameters<typeof $verified.${fn.name}>`,
-        `): ReturnType<typeof $verified.${fn.name}> {`,
-        `  const $args: ReadonlyArray<unknown> = args;`,
-        `  if ($args.length !== ${fn.params.length}) {`,
-        `    $fail(${key(fn.name)}, \`expected ${fn.params.length} argument(s), got \${$args.length}\`);`,
+        `  ...${rawArgs}: Parameters<typeof ${P}verified.${fn.name}>`,
+        `): ReturnType<typeof ${P}verified.${fn.name}> {`,
+        `  const ${P}args: ReadonlyArray<unknown> = ${rawArgs};`,
+        `  if (${P}args.length !== ${fn.params.length}) {`,
+        `    ${P}fail(${key(fn.name)}, \`expected ${fn.params.length} argument(s), got \${${P}args.length}\`);`,
         `  }`,
       ];
-      fn.params.forEach((p, i) => {
-        lines.push(`  const ${p.name} = ${checkerFor(p.type)}(${key(fn.name)}, ${key(p.name)}, $args[${i}]);`);
+      fn.params.forEach((param, i) => {
+        lines.push(`  const ${param.name} = ${checkerFor(param.type)}(${key(fn.name)}, ${key(param.name)}, ${P}args[${i}]);`);
       });
       for (const req of fn.requires) {
         const text = conditionText(fn.name, req);
-        lines.push(`  if (!(${text})) $precondition(${key(fn.name)}, ${key(req.getText(sf).replace(/\s+/g, " "))});`);
+        lines.push(`  if (!(${text})) ${P}precondition(${key(fn.name)}, ${key(req.getText(sf).replace(/\s+/g, " "))});`);
       }
-      lines.push(`  return $verified.${fn.name}(${fn.params.map((p) => p.name).join(", ")});`, `}`);
+      lines.push(`  return ${P}verified.${fn.name}(${fn.params.map((param) => param.name).join(", ")});`, `}`);
       return lines.join("\n");
     });
 
@@ -266,30 +340,30 @@ export function generateGuards(filePaths: ReadonlyArray<string>): GuardResult[] 
       `// arguments' runtime types, copies records into frozen objects with only the declared`,
       `// fields, checks the function's \`requires\`, and then calls the verified function.`,
       ``,
-      `import * as $verified from ${key(`./${parsed.name}.js`)};`,
+      `import * as ${P}verified from ${key(`./${parsed.name}.js`)};`,
       ...depImportLines,
       ``,
-      `function $show(v: unknown): string {`,
+      `function ${P}show(v: unknown): string {`,
       `  return v === null ? "null" : typeof v === "bigint" ? \`\${v}n\` : typeof v === "object" ? "an object" : \`\${typeof v} \${String(v)}\`;`,
       `}`,
-      `function $fail(fn: string, problem: string): never {`,
+      `function ${P}fail(fn: string, problem: string): never {`,
       `  throw new TypeError(\`\${fn}: \${problem}\`);`,
       `}`,
-      `function $precondition(fn: string, condition: string): never {`,
+      `function ${P}precondition(fn: string, condition: string): never {`,
       `  throw new RangeError(\`\${fn}: precondition violated: requires(\${condition})\`);`,
       `}`,
-      `function $bigint(fn: string, at: string, v: unknown): bigint {`,
-      `  if (typeof v !== "bigint") $fail(fn, \`\${at} must be a bigint, got \${$show(v)}\`);`,
+      `function ${P}bigint(fn: string, at: string, v: unknown): bigint {`,
+      `  if (typeof v !== "bigint") ${P}fail(fn, \`\${at} must be a bigint, got \${${P}show(v)}\`);`,
       `  return v;`,
       `}`,
-      `function $boolean(fn: string, at: string, v: unknown): boolean {`,
-      `  if (typeof v !== "boolean") $fail(fn, \`\${at} must be a boolean, got \${$show(v)}\`);`,
+      `function ${P}boolean(fn: string, at: string, v: unknown): boolean {`,
+      `  if (typeof v !== "boolean") ${P}fail(fn, \`\${at} must be a boolean, got \${${P}show(v)}\`);`,
       `  return v;`,
       `}`,
       ...(usesImplies
-        ? [`function $implies(premise: boolean, conclusion: boolean): boolean {`, `  return !premise || conclusion;`, `}`]
+        ? [`function ${P}implies(premise: boolean, conclusion: boolean): boolean {`, `  return !premise || conclusion;`, `}`]
         : []),
-      ...[...usedArrayHelpers].sort().map((h) => ARRAY_HELPER_SOURCE[h]),
+      ...[...usedArrayHelpers].sort().map((h) => arrayHelperSource(P, h)),
       ...checkerDefs,
       ``,
       wrappers.join("\n\n"),

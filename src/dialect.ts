@@ -77,6 +77,7 @@ export interface DialectAnalysis {
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = path.resolve(MODULE_DIR, "..");
 const RUNTIME_REL_PATHS = ["src/runtime.ts", "dist/runtime.d.ts", "dist/runtime.js"];
+const PACKAGE_ENTRY_REL_PATHS = [...RUNTIME_REL_PATHS, "src/index.ts", "dist/index.d.ts", "dist/index.js"];
 
 function safeRealpath(p: string): string {
   try {
@@ -101,20 +102,24 @@ const OWN_PACKAGE_NAME: string | undefined = (() => {
 const BUNDLED_RUNTIME_FILES = new Set(
   RUNTIME_REL_PATHS.map((rel) => safeRealpath(path.join(PACKAGE_ROOT, rel))),
 );
+const BUNDLED_PACKAGE_ENTRY_FILES = new Set(
+  PACKAGE_ENTRY_REL_PATHS.map((rel) => safeRealpath(path.join(PACKAGE_ROOT, rel))),
+);
 
 const runtimeFileCache = new Map<string, boolean>();
+const packageEntryFileCache = new Map<string, boolean>();
 
-/**
- * True if `fileName` is the tslaw runtime module: either this installation's own copy, or
- * the runtime of an installed package with the same name (e.g. a project-local install checked
- * by a globally installed CLI).
- */
-export function isTslawRuntimeFile(fileName: string): boolean {
-  const cached = runtimeFileCache.get(fileName);
+function matchesOwnPackageFile(
+  fileName: string,
+  bundled: ReadonlySet<string>,
+  relPaths: ReadonlyArray<string>,
+  cache: Map<string, boolean>,
+): boolean {
+  const cached = cache.get(fileName);
   if (cached !== undefined) return cached;
 
   const real = safeRealpath(fileName);
-  let result = BUNDLED_RUNTIME_FILES.has(real);
+  let result = bundled.has(real);
   if (!result && OWN_PACKAGE_NAME) {
     let dir = path.dirname(real);
     while (true) {
@@ -125,7 +130,7 @@ export function isTslawRuntimeFile(fileName: string): boolean {
           const name =
             typeof pkg === "object" && pkg !== null && "name" in pkg ? pkg.name : undefined;
           const rel = path.relative(dir, real).split(path.sep).join("/");
-          result = name === OWN_PACKAGE_NAME && RUNTIME_REL_PATHS.includes(rel);
+          result = name === OWN_PACKAGE_NAME && relPaths.includes(rel);
         } catch {
           result = false;
         }
@@ -136,8 +141,26 @@ export function isTslawRuntimeFile(fileName: string): boolean {
       dir = parent;
     }
   }
-  runtimeFileCache.set(fileName, result);
+  cache.set(fileName, result);
   return result;
+}
+
+/**
+ * True if `fileName` is the tslaw runtime module: either this installation's own copy, or
+ * the runtime of an installed package with the same name (e.g. a project-local install checked
+ * by a globally installed CLI).
+ */
+export function isTslawRuntimeFile(fileName: string): boolean {
+  return matchesOwnPackageFile(fileName, BUNDLED_RUNTIME_FILES, RUNTIME_REL_PATHS, runtimeFileCache);
+}
+
+function isTslawPackageEntryFile(fileName: string): boolean {
+  return matchesOwnPackageFile(
+    fileName,
+    BUNDLED_PACKAGE_ENTRY_FILES,
+    PACKAGE_ENTRY_REL_PATHS,
+    packageEntryFileCache,
+  );
 }
 
 /** Runtime helpers on arrays, with the number of arguments each takes. */
@@ -227,7 +250,7 @@ export function vTypeKey(t: VType): string {
   if (t.kind === "bigint") return "Int";
   if (t.kind === "boolean") return "Bool";
   if (t.kind === "array") return `[${vTypeKey(t.element)}]`;
-  return `{${t.fields.map((f) => `${f.name}:${vTypeKey(f.type)}`).join(",")}}`;
+  return `{${t.fields.map((f) => `${JSON.stringify(f.name)}:${vTypeKey(f.type)}`).join(",")}}`;
 }
 
 export function vTypesEqual(a: VType, b: VType): boolean {
@@ -331,6 +354,12 @@ export function resolveVType(
     if (type.getCallSignatures().length > 0) {
       return { ok: false, reason: "higher-order function values are not supported" };
     }
+    if (type.getConstructSignatures().length > 0) {
+      return { ok: false, reason: "constructor types are not supported" };
+    }
+    if (type.getStringIndexType() || type.getNumberIndexType()) {
+      return { ok: false, reason: "index signatures are not supported in verified records" };
+    }
     const props = type.getProperties();
     if (props.length === 0) {
       return { ok: false, reason: "empty object types are not supported" };
@@ -338,6 +367,18 @@ export function resolveVType(
     seen.add(type);
     const fields: Array<{ name: string; type: VType }> = [];
     for (const prop of props) {
+      if (String(prop.escapedName).startsWith("__@")) {
+        return {
+          ok: false,
+          reason: `symbol-keyed field \`${prop.name}\` is not supported in verified records`,
+        };
+      }
+      if (prop.name === "__proto__") {
+        return {
+          ok: false,
+          reason: "field `__proto__` is forbidden in verified records (it alters prototypes in JavaScript instead of defining a normal field)",
+        };
+      }
       if (prop.flags & ts.SymbolFlags.Optional) {
         return {
           ok: false,
@@ -372,7 +413,7 @@ export function resolveVType(
       }
       fields.push({ name: prop.name, type: resolved.type });
     }
-    fields.sort((a, b) => a.name.localeCompare(b.name));
+    fields.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     return { ok: true, type: { kind: "record", fields } };
   }
 
@@ -458,9 +499,16 @@ export function analyzeDialect(
   const importedEnsures = new Set<VerifiedEnsures>();
   const analyzedDeps = new Set<string>();
   for (const stmt of sf.statements) {
-    if (!ts.isImportDeclaration(stmt) || !stmt.importClause) continue;
+    if (!ts.isImportDeclaration(stmt)) continue;
+    if (!stmt.importClause) {
+      addError("LAW001", "Side-effect imports are not allowed in verified modules", stmt);
+      continue;
+    }
     if (stmt.importClause.isTypeOnly) continue;
-    if (!stmt.importClause.namedBindings) {
+    if (stmt.importClause.name) {
+      addError("LAW001", "Default imports are not allowed in verified modules", stmt);
+      if (!stmt.importClause.namedBindings) continue;
+    } else if (!stmt.importClause.namedBindings) {
       addError("LAW001", "Default imports are not allowed in verified modules", stmt);
       continue;
     }
@@ -468,11 +516,21 @@ export function analyzeDialect(
       addError("LAW001", "Namespace imports are not allowed in verified modules", stmt);
       continue;
     }
+    const specSf = checker
+      .getSymbolAtLocation(stmt.moduleSpecifier)
+      ?.declarations?.find(ts.isSourceFile);
     for (const elem of stmt.importClause.namedBindings.elements) {
       if (elem.isTypeOnly) continue;
       const orig = elem.propertyName?.text ?? elem.name.text;
       const callee = resolveCallee(checker, elem.name);
       if (callee.kind === "runtime") {
+        if (specSf && !isTslawPackageEntryFile(specSf.fileName)) {
+          addError(
+            "LAW001",
+            `\`${orig}\` must be imported directly from the tslaw package (not re-exported through ${specSf.fileName})`,
+            elem,
+          );
+        }
         continue;
       }
       const sym = checker.getSymbolAtLocation(elem.name);
@@ -497,6 +555,14 @@ export function analyzeDialect(
           addError(
             "LAW001",
             `Imported function \`${orig}\` is from an unverified module (add \`"use verified";\` to ${depSf.fileName})`,
+            elem,
+          );
+          continue;
+        }
+        if (specSf && specSf !== depSf && !hasUseVerifiedDirective(specSf)) {
+          addError(
+            "LAW001",
+            `Imported function \`${orig}\` is re-exported through an unverified module (${specSf.fileName}); import it directly from ${depSf.fileName}`,
             elem,
           );
           continue;
@@ -621,10 +687,9 @@ export function analyzeDialect(
       if (ts.isPrefixUnaryExpression(expr)) {
         if (
           expr.operator !== ts.SyntaxKind.MinusToken &&
-          expr.operator !== ts.SyntaxKind.ExclamationToken &&
-          expr.operator !== ts.SyntaxKind.PlusToken
+          expr.operator !== ts.SyntaxKind.ExclamationToken
         ) {
-          addError("LAW012", "Mutating unary operators (`++`, `--`, `~`) are forbidden", expr);
+          addError("LAW012", "Prefix unary operators (`+`, `++`, `--`, `~`) are forbidden (only `-` and `!` are allowed)", expr);
           return;
         }
         if (expr.operator === ts.SyntaxKind.ExclamationToken) requireBoolean(expr.operand);
@@ -742,8 +807,16 @@ export function analyzeDialect(
               addError("LAW017", "Computed or non-identifier record keys are forbidden", prop.name);
               continue;
             }
+            if (prop.name.text === "__proto__") {
+              addError("LAW017", "`__proto__` is forbidden as a record key", prop.name);
+              continue;
+            }
             checkExpr(prop.initializer, scope);
           } else if (ts.isShorthandPropertyAssignment(prop)) {
+            if (prop.name.text === "__proto__") {
+              addError("LAW017", "`__proto__` is forbidden as a record key", prop.name);
+              continue;
+            }
             checkExpr(prop.name, scope);
           } else {
             addError(
@@ -976,10 +1049,28 @@ export function analyzeDialect(
               if (isLet) ctx.mutable.add(decl.name.text);
               else ctx.mutable.delete(decl.name.text);
             } else if (ts.isObjectBindingPattern(decl.name) && isConst) {
+              if (initType.ok && initType.type.kind !== "record") {
+                addError("LAW022", "Object destructuring is only allowed on verified `readonly` records", decl.name);
+              }
               for (const el of decl.name.elements) {
                 if (el.dotDotDotToken || el.initializer || !ts.isIdentifier(el.name)) {
                   addError("LAW022", "Rest/default/nested destructuring is not supported", el);
                   continue;
+                }
+                if (el.propertyName && !ts.isIdentifier(el.propertyName)) {
+                  addError("LAW022", "Computed or non-identifier destructuring keys are forbidden", el.propertyName);
+                  continue;
+                }
+                const propName =
+                  el.propertyName && ts.isIdentifier(el.propertyName)
+                    ? el.propertyName.text
+                    : el.name.text;
+                if (
+                  initType.ok &&
+                  initType.type.kind === "record" &&
+                  !initType.type.fields.some((f) => f.name === propName)
+                ) {
+                  addError("LAW016", `\`${propName}\` is not a declared field of this record`, el.propertyName ?? el.name);
                 }
                 scope.add(el.name.text);
                 ctx.mutable.delete(el.name.text);
@@ -1112,6 +1203,10 @@ export function analyzeDialect(
       }
       if (!ts.isIdentifier(p.name)) {
         addError("LAW005", "Destructured parameters are not supported; name parameters directly", p);
+        continue;
+      }
+      if (p.name.text === "this") {
+        addError("LAW005", "`this` parameters are not supported in verified modules", p);
         continue;
       }
       if (!p.type && !allowInferred) {

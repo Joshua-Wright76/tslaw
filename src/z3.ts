@@ -61,11 +61,17 @@ function decodeSExprValue(
   recordsByCtor: ReadonlyMap<string, RecordDef>,
 ): { formatted: string; raw: unknown } {
   if (type.kind === "bigint") {
-    if (typeof expr === "string") {
+    if (typeof expr === "string" && /^\d+$/.test(expr)) {
       const n = BigInt(expr);
       return { formatted: `${n}n`, raw: n };
     }
-    if (Array.isArray(expr) && expr.length === 2 && expr[0] === "-" && typeof expr[1] === "string") {
+    if (
+      Array.isArray(expr) &&
+      expr.length === 2 &&
+      expr[0] === "-" &&
+      typeof expr[1] === "string" &&
+      /^\d+$/.test(expr[1])
+    ) {
       const n = -BigInt(expr[1]);
       return { formatted: `${n}n`, raw: n };
     }
@@ -78,8 +84,9 @@ function decodeSExprValue(
   }
 
   if (type.kind === "array") {
-    // Solvers print sequences as (as seq.empty (Seq T)), (seq.unit x), or (seq.++ part ...).
+    // Solvers print sequences as (as seq.empty (Seq T)), seq.empty, (seq.unit x), or (seq.++ part ...).
     const elements = (e: SExpr): SExpr[] | undefined => {
+      if (e === "seq.empty") return [];
       if (!Array.isArray(e)) return undefined;
       if (e[0] === "as" && e[1] === "seq.empty") return [];
       if (e[0] === "seq.unit" && e.length === 2) return [e[1]!];
@@ -215,6 +222,10 @@ async function runSolver(lowered: LoweredLaw, solver: SolverSpec): Promise<Z3Run
       stderr += chunk.toString("utf8");
     });
 
+    child.stdin.on("error", () => {
+      // Ignore EPIPE when the solver exits before consuming all input; `close`/`error` reports it.
+    });
+
     child.on("error", (err) => {
       finish({
         status: "error",
@@ -223,8 +234,29 @@ async function runSolver(lowered: LoweredLaw, solver: SolverSpec): Promise<Z3Run
       });
     });
 
-    child.on("close", () => {
+    child.on("close", (code, signal) => {
       const durationMs = Math.round(performance.now() - start);
+      // cvc5 reports a hit time limit as a message and a non-zero exit, not as a verdict.
+      if (/interrupted by timeout/.test(stdout + stderr)) {
+        finish({ status: "unknown", durationMs, reason: `${solver.name} timed out after ${options.timeoutMs}ms` });
+        return;
+      }
+      if (signal !== null) {
+        finish({
+          status: "error",
+          durationMs,
+          reason: `${solver.name} terminated with signal ${signal}${stderr.trim() ? `: ${stderr.trim()}` : ""}`.slice(0, 500),
+        });
+        return;
+      }
+      if (solver.name === "cvc5" && code !== 0 && stderr.trim().length > 0) {
+        finish({
+          status: "error",
+          durationMs,
+          reason: `${solver.name} exited with code ${code}: ${stderr.trim()}`.slice(0, 500),
+        });
+        return;
+      }
       const lines = stdout
         .split(/\r?\n/)
         .map((l) => l.trim())
