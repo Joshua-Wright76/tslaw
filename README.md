@@ -46,7 +46,7 @@ npm install --save-dev tslaw
 Requirements:
 
 - Node.js 20 or newer.
-- The `z3` binary on your `PATH` (`brew install z3`, `apt-get install z3`, or a [release build](https://github.com/Z3Prover/z3/releases)). To use a binary elsewhere, pass `--z3 /path/to/z3` or set `TSLAW_Z3`.
+- The `z3` binary on your `PATH` (`brew install z3` or a [release build](https://github.com/Z3Prover/z3/releases)). To use a binary elsewhere, pass `--z3 /path/to/z3` or set `TSLAW_Z3`. Distribution packages can be years old: Ubuntu's `apt` Z3 times out on array and recursion proofs that a current release settles in milliseconds. CI uses Z3 5.4.1 and cvc5 1.4.2.
 
 ## Usage
 

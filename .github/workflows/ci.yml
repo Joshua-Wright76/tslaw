@@ -18,8 +18,20 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - name: Install Z3
-        run: sudo apt-get update && sudo apt-get install -y z3 && z3 --version
+      # Pinned solver releases: Ubuntu's packaged Z3 is years older and much weaker on
+      # sequences and recursive definitions, which made verdicts depend on the runner.
+      - name: Install Z3 and cvc5 (pinned, checksummed)
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/solvers" && cd "$HOME/solvers"
+          curl -sSfLo z3.zip https://github.com/Z3Prover/z3/releases/download/z3-5.4.1/z3-5.4.1-x64-glibc-2.39.zip
+          echo "b548bac48ef2452b4e09ea2945cf4b011d5f43fcf39e4799df268ee7e0769d85  z3.zip" | sha256sum -c -
+          curl -sSfLo cvc5.zip https://github.com/cvc5/cvc5/releases/download/cvc5-1.4.2/cvc5-Linux-x86_64-static.zip
+          echo "7eb18f8c814c36a46c5a7d003983e9cfbc4b0a9828d6dd596239291bd4cc61d8  cvc5.zip" | sha256sum -c -
+          unzip -q z3.zip && unzip -q cvc5.zip
+          echo "$HOME/solvers/z3-5.4.1-x64-glibc-2.39/bin" >> "$GITHUB_PATH"
+          echo "$HOME/solvers/cvc5-Linux-x86_64-static/bin" >> "$GITHUB_PATH"
+      - run: z3 --version && cvc5 --version | head -1
       - run: npm ci
       - run: npm run build
       - run: npm test
