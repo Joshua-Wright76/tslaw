@@ -158,6 +158,30 @@ law("swap preserves order (false!)", (p: Pair) => {
     expect(report.files[0]!.diagnostics.map((d) => d.code)).toContain("LAW033");
   });
 
+  it("rejects bigint used as a boolean instead of sending it to Z3", async () => {
+    const report = await verifyFiles(["test/fixtures/dialect/truthiness.law.ts"]);
+    expect(report.ok).toBe(false);
+    const codes = report.files[0]!.diagnostics.map((d) => d.code);
+    // `if (x)`, `x ? :`, `!x`, and both operands of `x || y`
+    expect(codes.filter((c) => c === "LAW034").length).toBe(5);
+    expect(new Set(codes)).toEqual(new Set(["LAW034"]));
+  });
+
+  it("rejects literal-typed parameters, which would get bogus counterexamples", async () => {
+    const report = await verifyFiles(["test/fixtures/dialect/literal-param.law.ts"]);
+    expect(report.ok).toBe(false);
+    expect(report.summary.disproved).toBe(0);
+    const codes = report.files[0]!.diagnostics.map((d) => d.code);
+    expect(codes).toEqual(["LAW006", "LAW006"]);
+  });
+
+  it("does not type-check files that have not opted in", async () => {
+    const file = writeTempLawFile("broken.ts", `const s: string = 5;\nexport const t = s;\n`);
+    const report = await verifyFiles([file]);
+    expect(report.ok).toBe(true);
+    expect(report.files[0]!.diagnostics).toEqual([]);
+  });
+
   it("type-checks imported 'use verified' modules, not just the named file", async () => {
     const report = await verifyFiles(["test/fixtures/dialect/imports-type-error.law.ts"]);
     expect(report.ok).toBe(false);

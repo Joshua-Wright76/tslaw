@@ -410,7 +410,8 @@ export function lowerModuleLaws(
 
   return loweredLawBodies.map(({ law, paramSmtNames, bodySmt }) => {
     const lines: string[] = [
-      `; lawscript law: ${law.name}`,
+      // JSON-quoted: a raw newline in the name would end the comment and inject SMT commands.
+      `; lawscript law: ${JSON.stringify(law.name)}`,
       "(set-option :produce-models true)",
       ...datatypeDecls,
       ...fnDefs,

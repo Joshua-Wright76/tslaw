@@ -159,6 +159,9 @@ export function hasUseVerifiedDirective(sf: ts.SourceFile): boolean {
   return false;
 }
 
+/** `ts.CheckFlags.Readonly` (internal to TypeScript, stable since 2.x). */
+const CHECK_FLAGS_READONLY = 1 << 3;
+
 export function vTypeKey(t: VType): string {
   if (t.kind === "bigint") return "Int";
   if (t.kind === "boolean") return "Bool";
@@ -171,13 +174,30 @@ export function vTypesEqual(a: VType, b: VType): boolean {
 
 /**
  * Convert a resolved TypeScript type into a supported lawscript VType.
+ *
+ * With `declared` set (parameter types), literal types such as `5n` or `true` are rejected:
+ * they are modeled as plain `Int`/`Bool`, so a law quantifying over such a parameter would
+ * range over values the type does not allow and report bogus counterexamples.
  */
 export function resolveVType(
   checker: ts.TypeChecker,
   type: ts.Type,
   seen = new Set<ts.Type>(),
+  declared = false,
 ): { ok: true; type: VType } | { ok: false; reason: string } {
   const flags = type.getFlags();
+
+  if (
+    declared &&
+    (flags & ts.TypeFlags.BigIntLiteral ||
+      (flags & ts.TypeFlags.BooleanLiteral && !(flags & ts.TypeFlags.Boolean)))
+  ) {
+    const base = flags & ts.TypeFlags.BigIntLiteral ? "bigint" : "boolean";
+    return {
+      ok: false,
+      reason: `literal type \`${checker.typeToString(type)}\` is not supported here; use \`${base}\` and state the restriction with \`implies\``,
+    };
+  }
 
   if (flags & (ts.TypeFlags.BigInt | ts.TypeFlags.BigIntLiteral)) {
     return { ok: true, type: { kind: "bigint" } };
@@ -248,10 +268,17 @@ export function resolveVType(
       if (!decl) {
         return { ok: false, reason: `cannot inspect field \`${prop.name}\`` };
       }
+      // Properties made readonly by a mapped type (`Readonly<T>`) keep their original,
+      // unmodified declaration; the readonly-ness lives on the symbol's check flags.
+      const checkFlags =
+        (prop as { links?: { checkFlags?: number } }).links?.checkFlags ??
+        (prop as { checkFlags?: number }).checkFlags ??
+        0;
       const isReadonly =
-        (ts.isPropertySignature(decl) || ts.isPropertyDeclaration(decl))
+        (checkFlags & CHECK_FLAGS_READONLY) !== 0 ||
+        ((ts.isPropertySignature(decl) || ts.isPropertyDeclaration(decl))
           ? Boolean(decl.modifiers?.some((m) => m.kind === ts.SyntaxKind.ReadonlyKeyword))
-          : ts.isPropertyAssignment(decl) || ts.isShorthandPropertyAssignment(decl);
+          : ts.isPropertyAssignment(decl) || ts.isShorthandPropertyAssignment(decl));
       if (!isReadonly) {
         return {
           ok: false,
@@ -259,7 +286,7 @@ export function resolveVType(
         };
       }
       const propType = checker.getTypeOfSymbolAtLocation(prop, decl);
-      const resolved = resolveVType(checker, propType, new Set(seen));
+      const resolved = resolveVType(checker, propType, new Set(seen), declared);
       if (!resolved.ok) {
         return { ok: false, reason: `field \`${prop.name}\`: ${resolved.reason}` };
       }
@@ -402,6 +429,19 @@ export function analyzeDialect(
     localNames: Set<string>,
     callsOut: Set<ts.FunctionDeclaration>,
   ): void => {
+    // JavaScript lets any value act as a condition (`0n` is falsy). The SMT encoding has no
+    // truthiness, so conditions and logical operands must be real booleans.
+    const requireBoolean = (expr: ts.Expression): void => {
+      const t = resolveVType(checker, checker.getTypeAtLocation(expr));
+      if (t.ok && t.type.kind !== "boolean") {
+        addError(
+          "LAW034",
+          "Conditions and operands of `!`, `&&`, `||` must be `boolean`; write an explicit comparison such as `x !== 0n`",
+          expr,
+        );
+      }
+    };
+
     const checkExpr = (expr: ts.Expression, scope: Set<string>): void => {
       if (ts.isParenthesizedExpression(expr)) {
         checkExpr(expr.expression, scope);
@@ -441,6 +481,7 @@ export function analyzeDialect(
           addError("LAW012", "Mutating unary operators (`++`, `--`, `~`) are forbidden", expr);
           return;
         }
+        if (expr.operator === ts.SyntaxKind.ExclamationToken) requireBoolean(expr.operand);
         checkExpr(expr.operand, scope);
         return;
       }
@@ -496,11 +537,16 @@ export function analyzeDialect(
             );
           }
         }
+        if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
+          requireBoolean(expr.left);
+          requireBoolean(expr.right);
+        }
         checkExpr(expr.left, scope);
         checkExpr(expr.right, scope);
         return;
       }
       if (ts.isConditionalExpression(expr)) {
+        requireBoolean(expr.condition);
         checkExpr(expr.condition, scope);
         checkExpr(expr.whenTrue, scope);
         checkExpr(expr.whenFalse, scope);
@@ -636,6 +682,7 @@ export function analyzeDialect(
           continue;
         }
         if (ts.isIfStatement(stmt)) {
+          requireBoolean(stmt.expression);
           checkExpr(stmt.expression, scope);
           const checkBranch = (branch: ts.Statement): boolean => {
             if (ts.isBlock(branch)) return checkBlock(branch, scope);
@@ -713,6 +760,11 @@ export function analyzeDialect(
     }
   };
 
+  // Every named parameter is in scope, even one whose type was rejected, so a bad parameter
+  // type does not also produce a misleading "not a local" error at each use.
+  const paramScope = (params: ts.NodeArray<ts.ParameterDeclaration>): Set<string> =>
+    new Set(params.flatMap((p) => (ts.isIdentifier(p.name) ? [p.name.text] : [])));
+
   const checkParams = (
     params: ts.NodeArray<ts.ParameterDeclaration>,
   ): VerifiedParam[] => {
@@ -730,7 +782,7 @@ export function analyzeDialect(
         addError("LAW005", `Parameter \`${p.name.text}\` must have an explicit type annotation`, p);
         continue;
       }
-      const resolved = resolveVType(checker, checker.getTypeAtLocation(p));
+      const resolved = resolveVType(checker, checker.getTypeAtLocation(p), new Set(), true);
       if (!resolved.ok) {
         addError("LAW006", `Parameter \`${p.name.text}\`: ${resolved.reason}`, p);
         continue;
@@ -783,7 +835,7 @@ export function analyzeDialect(
       }
       const params = checkParams(stmt.parameters);
       const calls = new Set<ts.FunctionDeclaration>();
-      checkBody(stmt.body, new Set(params.map((p) => p.name)), calls);
+      checkBody(stmt.body, paramScope(stmt.parameters), calls);
       functions.push({
         name: stmt.name.text,
         decl: stmt,
@@ -825,7 +877,7 @@ export function analyzeDialect(
       }
       const params = checkParams(fnArg.parameters);
       const calls = new Set<ts.FunctionDeclaration>();
-      checkBody(fnArg.body, new Set(params.map((p) => p.name)), calls);
+      checkBody(fnArg.body, paramScope(fnArg.parameters), calls);
       laws.push({
         name: nameArg.text,
         params,

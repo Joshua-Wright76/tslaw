@@ -43,8 +43,10 @@ export async function verifyFiles(
 
   const compilerOptions: ts.CompilerOptions = {
     target: ts.ScriptTarget.ES2022,
-    module: ts.ModuleKind.NodeNext,
-    moduleResolution: ts.ModuleResolutionKind.NodeNext,
+    // Bundler resolution accepts both `./mod.js` and extensionless `./mod` imports, plus
+    // package `exports`, so verified modules resolve the same way in most project setups.
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
     strict: true,
     noUncheckedIndexedAccess: true,
     exactOptionalPropertyTypes: true,
@@ -79,6 +81,13 @@ export async function verifyFiles(
         ],
         laws: [],
       });
+      continue;
+    }
+
+    // Files that have not opted in are skipped entirely; they are not held to lawscript's
+    // stricter compiler options.
+    if (requireDirective && !hasUseVerifiedDirective(sf)) {
+      fileResults.push({ file: absPath, verifiedDirective: false, diagnostics: [], laws: [] });
       continue;
     }
 

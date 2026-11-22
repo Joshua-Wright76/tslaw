@@ -87,7 +87,7 @@ Each file goes through three stages. A failure at any stage stops that file.
 
 - `bigint`, modeled as a mathematical integer (exact, unbounded).
 - `boolean`.
-- Records whose fields are all `readonly` and themselves supported types. Passing a record with extra fields where fewer are expected is allowed, as in TypeScript.
+- Records whose fields are all `readonly` (written out, or via `Readonly<...>`) and themselves supported types. Passing a record with extra fields where fewer are expected is allowed, as in TypeScript.
 
 **Code**
 
@@ -132,7 +132,7 @@ Codes starting with `TS` come from the TypeScript compiler. The rest are lawscri
 | `LAW003` | `async`, generator, generic, or body-less function. |
 | `LAW004` | Function return type is missing or not a supported type. |
 | `LAW005` | Parameter is optional, rest, defaulted, destructured, or has no type annotation. |
-| `LAW006` | Parameter has an unsupported type. |
+| `LAW006` | Parameter has an unsupported type (including literal types such as `5n` or `true`). |
 | `LAW010` | `number` literal; write a `bigint` literal such as `1n`. |
 | `LAW011` | Identifier is not a parameter or local `const` (globals are forbidden). |
 | `LAW012` | Mutating or bitwise unary operator (`++`, `--`, `~`). |
@@ -157,6 +157,7 @@ Codes starting with `TS` come from the TypeScript compiler. The rest are lawscri
 | `LAW031` | Unsupported top-level statement. |
 | `LAW032` | Recursion (direct or through other functions). |
 | `LAW033` | `@ts-ignore`, `@ts-expect-error`, or `@ts-nocheck` comment. |
+| `LAW034` | A non-`boolean` (such as a `bigint`) used as a condition or as an operand of `!`, `&&`, `||`. |
 | `LAW090` | Internal: translation to SMT failed. Please report it. |
 
 ## Development

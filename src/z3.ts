@@ -147,7 +147,9 @@ export async function runZ3(
       finish({
         status: "error",
         durationMs: Math.round(performance.now() - start),
-        reason: `Failed to spawn Z3 (\`${options.z3Path}\`): ${err.message}`,
+        reason:
+          `Could not run Z3 (\`${options.z3Path}\`): ${err.message}. ` +
+          "Install it (`brew install z3`, `apt-get install z3`) or point to it with --z3 / LAWSCRIPT_Z3.",
       });
     });
 

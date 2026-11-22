@@ -48,6 +48,13 @@ Implemented:
 - Packaging: published name `lawscript`, CLI `lawscript`, MIT license, `files` = `dist` + README + LICENSE, Node >= 20. Error codes are `LAW###`; the README has the reference table and must be updated when a code is added.
 - CI: `.github/workflows/ci.yml` runs build + tests on Node 20 and 22 with apt-installed Z3.
 
+- Law names are JSON-quoted in the SMT comment header; a raw newline there once allowed SMT injection (`(assert false)` proved anything). Never write user-controlled text into the SMT script unescaped.
+- Conditions and operands of `!`/`&&`/`||` must be `boolean` (`LAW034`); JS truthiness of `bigint` is not modeled.
+- Parameter types reject literal types (`5n`, `true`) via `resolveVType(..., declared = true)`, because they would be quantified as plain `Int`/`Bool`. Expression types still accept them.
+- `Readonly<T>` records are recognized through TypeScript's internal symbol `checkFlags` (Readonly = `1 << 3`) in `resolveVType`; re-check this on TypeScript major upgrades (covered by `test/fixtures/soundness/readonly-utility.law.ts`).
+- Files without the directive are skipped before type-checking. The checker uses `module: ESNext` + `moduleResolution: Bundler` (accepts `./mod.js` and extensionless imports); the user's own tsconfig is not read.
+- The CLI sets `process.exitCode` rather than calling `process.exit()` after output, so large piped output is not truncated.
+
 ## Open Questions / Known Gaps
 - `package.json` `repository` assumes `github.com/Joshua-Wright76/lawscript`; that repo does not exist yet, and CI has never run on GitHub.
 - `AGENTS.md` and this file describe a personal agent workflow (the preview-port step does not apply to a CLI); decide whether to keep them in the public repo.

@@ -57,6 +57,10 @@ async function main(): Promise<void> {
       timeoutMs = parsed;
     } else if (a === "--z3") {
       z3Path = args[++i];
+      if (!z3Path) {
+        console.error("--z3 requires a path to the z3 binary");
+        process.exit(2);
+      }
     } else if (a.startsWith("-")) {
       console.error(`Unknown flag: ${a}`);
       process.exit(2);
@@ -85,7 +89,10 @@ async function main(): Promise<void> {
         2,
       ),
     );
-    process.exit(report.ok ? 0 : 1);
+    // Set the exit code instead of calling process.exit(): exiting immediately can truncate
+    // large output written to a pipe.
+    process.exitCode = report.ok ? 0 : 1;
+    return;
   }
 
   for (const f of report.files) {
@@ -140,7 +147,7 @@ async function main(): Promise<void> {
   console.log(
     `\nSummary: ${s.proved} proved, ${s.disproved} disproved, ${s.unknown} unknown, ${s.errors} errors (${s.verifiedFiles}/${s.totalFiles} verified files)`,
   );
-  process.exit(report.ok ? 0 : 1);
+  process.exitCode = report.ok ? 0 : 1;
 }
 
 main().catch((err) => {
