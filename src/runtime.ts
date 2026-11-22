@@ -1,7 +1,7 @@
 /**
  * tslaw runtime helpers.
  *
- * At runtime, `law`, `requires` and `ensures` are no-ops (they are proved statically by
+ * At runtime, `law`, `requires`, `decreases` and `ensures` are no-ops (they are proved statically by
  * `tslaw check`).
  * `implies(p, q)` is standard logical implication (`!p || q`) so laws can also be executed
  * directly in JS/tests against concrete inputs or Z3 counterexamples.
@@ -29,6 +29,18 @@ export function law<F extends (...args: any[]) => boolean>(
  */
 export function requires(_condition: boolean): void {
   // Proved at every verified call site by tslaw.
+}
+
+/**
+ * Declare the termination measure of a recursive verified function. Must directly follow the
+ * function's `requires` statements (or be the first statement when it has none).
+ *
+ * `tslaw check` proves that at every recursive call the measure gets strictly smaller while
+ * the caller's measure is at least zero. With several measures they are compared in order
+ * (lexicographically). At runtime this is a no-op.
+ */
+export function decreases(..._measures: bigint[]): void {
+  // Proved at every recursive call by tslaw.
 }
 
 /**

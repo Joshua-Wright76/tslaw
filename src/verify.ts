@@ -1,7 +1,7 @@
 import path from "node:path";
 import ts from "typescript";
 import { analyzeDialect, getLocation, hasUseVerifiedDirective } from "./dialect.js";
-import { lowerModuleLaws } from "./smt.js";
+import { lowerModuleLaws, type LoweredLaw } from "./smt.js";
 import type {
   Diagnostic,
   FileVerificationResult,
@@ -181,59 +181,106 @@ export async function verifyFiles(
     const lawResults: LawResult[] = new Array<LawResult>(loweredLaws.length);
     let nextIdx = 0;
 
+    /** Run one query through Z3 (and cvc5 when cross-checking) and combine the verdicts. */
+    const solve = async (lowered: LoweredLaw): Promise<LawResult> => {
+      const z3Only = await runZ3(lowered, { timeoutMs, z3Path });
+      let z3Res: Z3RunResult = z3Only;
+      let crossCheck: LawResult["crossCheck"];
+      if (options.crossCheck && z3Only.status !== "error") {
+        const other = await runCvc5(lowered, { timeoutMs, cvc5Path });
+        const decided = (s: string): boolean => s === "proved" || s === "disproved";
+        if (other.status === "error") {
+          z3Res = { ...other, durationMs: z3Only.durationMs + other.durationMs };
+        } else if (decided(z3Only.status) && decided(other.status)) {
+          if (z3Only.status === other.status) {
+            crossCheck = "confirmed";
+          } else {
+            z3Res = {
+              status: "error",
+              durationMs: z3Only.durationMs + other.durationMs,
+              reason: `SOLVERS DISAGREE: Z3 says ${z3Only.status}, cvc5 says ${other.status}. One of them is wrong; do not trust either verdict, and please report this.`,
+            };
+          }
+        } else if (decided(z3Only.status)) {
+          crossCheck = "unconfirmed";
+        } else if (decided(other.status)) {
+          z3Res = other;
+          crossCheck = "cvc5-only";
+        }
+      }
+      return {
+        file: absPath,
+        kind: lowered.kind,
+        name: lowered.law.name,
+        location: lowered.law.location,
+        params: lowered.law.params.map((p) => ({ name: p.name, type: p.type })),
+        status: z3Res.status,
+        durationMs: z3Res.durationMs,
+        ...(z3Res.counterexample ? { counterexample: z3Res.counterexample } : {}),
+        ...(options.emitSmt ? { smt: lowered.smtScript } : {}),
+        ...(z3Res.reason ? { reason: z3Res.reason } : {}),
+        ...(crossCheck ? { crossCheck } : {}),
+      };
+    };
+
     const worker = async (): Promise<void> => {
       while (nextIdx < loweredLaws.length) {
         const idx = nextIdx++;
-        const lowered = loweredLaws[idx]!;
-        const z3Only = await runZ3(lowered, { timeoutMs, z3Path });
-        let z3Res: Z3RunResult = z3Only;
-        let crossCheck: LawResult["crossCheck"];
-        if (options.crossCheck && z3Only.status !== "error") {
-          const other = await runCvc5(lowered, { timeoutMs, cvc5Path });
-          const decided = (s: string): boolean => s === "proved" || s === "disproved";
-          if (other.status === "error") {
-            z3Res = { ...other, durationMs: z3Only.durationMs + other.durationMs };
-          } else if (decided(z3Only.status) && decided(other.status)) {
-            if (z3Only.status === other.status) {
-              crossCheck = "confirmed";
-              confirmed++;
-            } else {
-              z3Res = {
-                status: "error",
-                durationMs: z3Only.durationMs + other.durationMs,
-                reason: `SOLVERS DISAGREE: Z3 says ${z3Only.status}, cvc5 says ${other.status}. One of them is wrong; do not trust either verdict, and please report this.`,
-              };
-            }
-          } else if (decided(z3Only.status)) {
-            crossCheck = "unconfirmed";
-          } else if (decided(other.status)) {
-            z3Res = other;
-            crossCheck = "cvc5-only";
-          }
-        }
-        if (z3Res.status === "proved") proved++;
-        else if (z3Res.status === "disproved") disproved++;
-        else if (z3Res.status === "unknown") unknown++;
-        else errors++;
-
-        lawResults[idx] = {
-          file: absPath,
-          kind: lowered.kind,
-          name: lowered.law.name,
-          location: lowered.law.location,
-          params: lowered.law.params.map((p) => ({ name: p.name, type: p.type })),
-          status: z3Res.status,
-          durationMs: z3Res.durationMs,
-          ...(z3Res.counterexample ? { counterexample: z3Res.counterexample } : {}),
-          ...(options.emitSmt ? { smt: lowered.smtScript } : {}),
-          ...(z3Res.reason ? { reason: z3Res.reason } : {}),
-          ...(crossCheck ? { crossCheck } : {}),
-        };
+        lawResults[idx] = await solve(loweredLaws[idx]!);
       }
     };
 
     const workerCount = Math.min(concurrency, loweredLaws.length);
     await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+    // A verdict that uses a recursive function's definition is only as good as the proof that
+    // the function terminates, and a proof that assumes a postcondition only as good as that
+    // postcondition's own proof. Withdraw verdicts whose foundations did not hold, after
+    // trying once more without the assumed postconditions.
+    const dependsOn = loweredLaws.map((l) => l.dependsOn);
+    const triedPlain = new Set<number>();
+    for (let changed = true; changed; ) {
+      changed = false;
+      for (let idx = 0; idx < loweredLaws.length; idx++) {
+        const lowered = loweredLaws[idx]!;
+        const res = lawResults[idx]!;
+        const failed =
+          res.status === "proved"
+            ? dependsOn[idx]!.find((d) => lawResults[d]!.status !== "proved")
+            : res.status === "disproved" || res.status === "error"
+              ? // A counterexample still stands if an assumed postcondition fails (assuming
+                // less cannot remove it), but not if a definition it uses is unfounded. In
+                // that case the solvers may even disagree, since the query is contradictory.
+                dependsOn[idx]!.find(
+                  (d) => lawResults[d]!.kind === "decreases" && lawResults[d]!.status !== "proved",
+                )
+              : undefined;
+        if (failed === undefined) continue;
+        changed = true;
+        if (res.status === "proved" && lowered.plain && !triedPlain.has(idx)) {
+          triedPlain.add(idx);
+          const retry = await solve({ ...lowered, smtScript: lowered.plain.smtScript });
+          if (retry.status === "proved" || retry.status === "disproved") {
+            lawResults[idx] = retry;
+            dependsOn[idx] = lowered.plain.dependsOn;
+            continue;
+          }
+        }
+        const { crossCheck: _c, counterexample: _x, ...rest } = res;
+        lawResults[idx] = {
+          ...rest,
+          status: "unknown",
+          reason: `Not established: this relies on "${lawResults[failed]!.name}", which was not proved.`,
+        };
+      }
+    }
+    for (const res of lawResults) {
+      if (res.status === "proved") proved++;
+      else if (res.status === "disproved") disproved++;
+      else if (res.status === "unknown") unknown++;
+      else errors++;
+      if (res.crossCheck === "confirmed") confirmed++;
+    }
 
     fileResults.push({
       file: absPath,

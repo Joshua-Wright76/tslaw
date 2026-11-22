@@ -23,6 +23,20 @@ export interface VerifiedFunction {
    * are the first `requires.length` statements of `body`, which evaluation skips.
    */
   readonly requires: ReadonlyArray<ts.Expression>;
+  /**
+   * Termination measure: the arguments of the `decreases(...)` statement that follows the
+   * `requires` statements, compared lexicographically. Empty when there is none.
+   */
+  readonly decreases: ReadonlyArray<ts.Expression>;
+  /** Number of leading `requires`/`decreases` statements in `body`, which evaluation skips. */
+  readonly prefixLength: number;
+  /**
+   * Index of the group of mutually recursive functions this one belongs to. Functions are
+   * listed callees first, with the members of a group next to each other.
+   */
+  readonly scc: number;
+  /** True if the function can (directly or through others) call itself. */
+  readonly recursive: boolean;
 }
 
 /** `ensures(fn, (...params, result) => post)`. */
@@ -125,7 +139,10 @@ export function isTslawRuntimeFile(fileName: string): boolean {
 }
 
 export type CalleeRef =
-  | { readonly kind: "runtime"; readonly helper: "law" | "implies" | "requires" | "ensures" }
+  | {
+      readonly kind: "runtime";
+      readonly helper: "law" | "implies" | "requires" | "ensures" | "decreases";
+    }
   | { readonly kind: "function"; readonly decl: ts.FunctionDeclaration }
   | { readonly kind: "other" };
 
@@ -142,7 +159,11 @@ export function resolveCallee(checker: ts.TypeChecker, ident: ts.Identifier): Ca
   if (!decl || !ts.isFunctionDeclaration(decl) || !decl.name) return { kind: "other" };
   const name = decl.name.text;
   if (
-    (name === "law" || name === "implies" || name === "requires" || name === "ensures") &&
+    (name === "law" ||
+      name === "implies" ||
+      name === "requires" ||
+      name === "ensures" ||
+      name === "decreases") &&
     isTslawRuntimeFile(decl.getSourceFile().fileName)
   ) {
     return { kind: "runtime", helper: name };
@@ -335,6 +356,12 @@ export function analyzeDialect(
 
   const hasVerifiedDirective = hasUseVerifiedDirective(sf);
   const diagnostics: Diagnostic[] = [];
+  /** This file's functions, before they are grouped and ordered by the call graph. */
+  type ParsedFunction = Omit<VerifiedFunction, "scc" | "recursive"> & {
+    /** Functions called from `requires` and `decreases`. */
+    readonly specCalls: ReadonlySet<ts.FunctionDeclaration>;
+  };
+  const parsed: ParsedFunction[] = [];
   const functions: VerifiedFunction[] = [];
   const laws: VerifiedLaw[] = [];
   const ensuresList: VerifiedEnsures[] = [];
@@ -383,6 +410,7 @@ export function analyzeDialect(
   // Track cross-file `"use verified";` imports. Runtime helpers (`law`, `implies`) and
   // verified functions are identified by resolving symbols, never by name.
   const importedFunctions = new Map<ts.FunctionDeclaration, VerifiedFunction>();
+  const importedEnsures = new Set<VerifiedEnsures>();
   const analyzedDeps = new Set<string>();
   for (const stmt of sf.statements) {
     if (!ts.isImportDeclaration(stmt) || !stmt.importClause) continue;
@@ -435,6 +463,7 @@ export function analyzeDialect(
           for (const depFn of depAnalysis.functions) {
             importedFunctions.set(depFn.decl, depFn);
           }
+          for (const depEnsures of depAnalysis.ensures) importedEnsures.add(depEnsures);
         }
         continue;
       }
@@ -450,19 +479,40 @@ export function analyzeDialect(
     body: ts.Block | ts.Expression,
     localNames: Set<string>,
     callsOut: Set<ts.FunctionDeclaration>,
-    /** When given, leading `requires(...)` statements are allowed and collected here. */
-    requiresOut?: ts.Expression[],
+    /**
+     * When given, the leading `requires(...)` statements and one `decreases(...)` after them
+     * are allowed and collected here.
+     */
+    spec?: {
+      readonly requires: ts.Expression[];
+      readonly decreases: ts.Expression[];
+      readonly calls: Set<ts.FunctionDeclaration>;
+      prefixLength: number;
+    },
   ): void => {
-    const asRequires = (stmt: ts.Statement): ts.CallExpression | undefined => {
+    const asSpec = (
+      stmt: ts.Statement,
+      helper: "requires" | "decreases",
+    ): ts.CallExpression | undefined => {
       if (
         ts.isExpressionStatement(stmt) &&
         ts.isCallExpression(stmt.expression) &&
         ts.isIdentifier(stmt.expression.expression)
       ) {
         const callee = resolveCallee(checker, stmt.expression.expression);
-        if (callee.kind === "runtime" && callee.helper === "requires") return stmt.expression;
+        if (callee.kind === "runtime" && callee.helper === helper) return stmt.expression;
       }
       return undefined;
+    };
+    /** Set while checking a `requires`/`decreases` argument. */
+    let inSpec = false;
+    const checkSpecExpr = (expr: ts.Expression, scope: Set<string>): void => {
+      inSpec = true;
+      try {
+        checkExpr(expr, scope);
+      } finally {
+        inSpec = false;
+      }
     };
 
     // JavaScript lets any value act as a condition (`0n` is falsy). The SMT encoding has no
@@ -649,6 +699,7 @@ export function analyzeDialect(
           return;
         }
         callsOut.add(callee.decl);
+        if (inSpec) spec?.calls.add(callee.decl);
         for (const arg of expr.arguments) checkExpr(arg, scope);
         return;
       }
@@ -670,10 +721,38 @@ export function analyzeDialect(
     const checkBlock = (block: ts.Block, outerScope: Set<string>, topLevel = false): boolean => {
       const scope = new Set(outerScope);
       let terminated = false;
-      let inRequiresPrefix = topLevel && requiresOut !== undefined;
+      let inRequiresPrefix = topLevel && spec !== undefined;
+      let mayDeclareMeasure = inRequiresPrefix;
 
       for (const stmt of block.statements) {
-        const req = asRequires(stmt);
+        const dec = asSpec(stmt, "decreases");
+        if (dec) {
+          if (!mayDeclareMeasure || !spec) {
+            addError(
+              "LAW037",
+              "`decreases(...)` must directly follow the `requires` statements at the start of a verified function body, and may appear only once",
+              stmt,
+            );
+            continue;
+          }
+          inRequiresPrefix = false;
+          mayDeclareMeasure = false;
+          spec.prefixLength++;
+          if (dec.arguments.length === 0) {
+            addError("LAW037", "`decreases` needs at least one `bigint` measure", stmt);
+            continue;
+          }
+          for (const m of dec.arguments) {
+            const t = resolveVType(checker, checker.getTypeAtLocation(m));
+            if (t.ok && t.type.kind !== "bigint") {
+              addError("LAW037", "Each `decreases` measure must be a `bigint`", m);
+            }
+            checkSpecExpr(m, scope);
+            spec.decreases.push(m);
+          }
+          continue;
+        }
+        const req = asSpec(stmt, "requires");
         if (req) {
           if (!inRequiresPrefix) {
             addError(
@@ -689,11 +768,13 @@ export function analyzeDialect(
             continue;
           }
           requireBoolean(cond);
-          checkExpr(cond, scope);
-          requiresOut?.push(cond);
+          checkSpecExpr(cond, scope);
+          spec?.requires.push(cond);
+          if (spec) spec.prefixLength++;
           continue;
         }
         inRequiresPrefix = false;
+        mayDeclareMeasure = false;
         if (terminated) {
           addError("LAW021", "Unreachable statement after `return`", stmt);
           break;
@@ -900,10 +981,18 @@ export function analyzeDialect(
       }
       const params = checkParams(stmt.parameters);
       const calls = new Set<ts.FunctionDeclaration>();
-      const requires: ts.Expression[] = [];
-      checkBody(stmt.body, paramScope(stmt.parameters), calls, requires);
-      functions.push({
-        requires,
+      const spec = {
+        requires: [] as ts.Expression[],
+        decreases: [] as ts.Expression[],
+        calls: new Set<ts.FunctionDeclaration>(),
+        prefixLength: 0,
+      };
+      checkBody(stmt.body, paramScope(stmt.parameters), calls, spec);
+      parsed.push({
+        requires: spec.requires,
+        decreases: spec.decreases,
+        prefixLength: spec.prefixLength,
+        specCalls: spec.calls,
         name: stmt.name.text,
         decl: stmt,
         params,
@@ -1015,45 +1104,102 @@ export function analyzeDialect(
     );
   }
 
-  // Third pass: merge imported verified functions and topologically sort call graph.
-  const allFunctions: VerifiedFunction[] = [...importedFunctions.values(), ...functions];
-  const fnMap = new Map(allFunctions.map((f) => [f.decl, f]));
-  const color = new Map<ts.FunctionDeclaration, 0 | 1 | 2>(); // 0=unvisited, 1=visiting, 2=done
-  const ordered: VerifiedFunction[] = [];
+  // Third pass: merge imported verified functions, group mutually recursive ones (Tarjan's
+  // strongly connected components) and order the groups callees first.
+  type Node = Omit<VerifiedFunction, "scc" | "recursive">;
+  const nodes = new Map<ts.FunctionDeclaration, Node>();
+  for (const fn of importedFunctions.values()) nodes.set(fn.decl, fn);
+  for (const fn of parsed) nodes.set(fn.decl, fn);
+  const specCallsOf = new Map(parsed.map((fn) => [fn.decl, fn.specCalls]));
 
-  const fnName = (d: ts.FunctionDeclaration): string => d.name?.text ?? "<anonymous>";
-  const dfs = (decl: ts.FunctionDeclaration, stack: ts.FunctionDeclaration[]): void => {
-    color.set(decl, 1);
-    const fn = fnMap.get(decl);
-    if (!fn) return;
-    for (const callee of fn.calls) {
-      const c = color.get(callee) ?? 0;
-      if (c === 1) {
-        const cycle = [...stack.slice(stack.indexOf(callee)), callee].map(fnName).join(" -> ");
+  const ordered: VerifiedFunction[] = [];
+  const index = new Map<ts.FunctionDeclaration, number>();
+  const low = new Map<ts.FunctionDeclaration, number>();
+  const onStack = new Set<ts.FunctionDeclaration>();
+  const stack: ts.FunctionDeclaration[] = [];
+  let nextIndex = 0;
+  let nextScc = 0;
+
+  const connect = (decl: ts.FunctionDeclaration): void => {
+    const node = nodes.get(decl);
+    if (!node) return;
+    index.set(decl, nextIndex);
+    low.set(decl, nextIndex);
+    nextIndex++;
+    stack.push(decl);
+    onStack.add(decl);
+    for (const callee of node.calls) {
+      if (!nodes.has(callee)) continue;
+      if (!index.has(callee)) {
+        connect(callee);
+        low.set(decl, Math.min(low.get(decl)!, low.get(callee)!));
+      } else if (onStack.has(callee)) {
+        low.set(decl, Math.min(low.get(decl)!, index.get(callee)!));
+      }
+    }
+    if (low.get(decl) !== index.get(decl)) return;
+
+    const members: Node[] = [];
+    for (;;) {
+      const top = stack.pop()!;
+      onStack.delete(top);
+      members.push(nodes.get(top)!);
+      if (top === decl) break;
+    }
+    members.reverse();
+    const group = new Set(members.map((m) => m.decl));
+    const recursive = members.length > 1 || members[0]!.calls.has(members[0]!.decl);
+    const scc = nextScc++;
+    for (const m of members) ordered.push({ ...m, scc, recursive });
+    if (!recursive) return;
+
+    // Errors in imported modules were already reported with those modules' diagnostics.
+    const names = members.map((m) => `\`${m.name}\``).join(", ");
+    for (const m of members) {
+      if (m.decl.getSourceFile() !== sf) continue;
+      if (m.decreases.length === 0) {
         diagnostics.push({
           stage: "dialect",
           code: "LAW032",
-          message: `Recursion is not supported in tslaw v0.1 (cycle: ${cycle})`,
-          location: fn.location,
+          message:
+            members.length > 1
+              ? `\`${m.name}\` is recursive (through ${names}) and needs a termination measure: add \`decreases(...)\` after its \`requires\``
+              : `\`${m.name}\` is recursive and needs a termination measure: add \`decreases(...)\` after its \`requires\``,
+          location: m.location,
         });
-      } else if (c === 0) {
-        dfs(callee, [...stack, callee]);
+        continue;
+      }
+      const longest = Math.max(...members.map((x) => x.decreases.length));
+      if (m.decreases.length !== longest && members.every((x) => x.decreases.length > 0)) {
+        diagnostics.push({
+          stage: "dialect",
+          code: "LAW037",
+          message: `Mutually recursive functions (${names}) must give \`decreases\` the same number of measures`,
+          location: m.location,
+        });
+      }
+      for (const callee of specCallsOf.get(m.decl) ?? []) {
+        if (!group.has(callee)) continue;
+        diagnostics.push({
+          stage: "dialect",
+          code: "LAW037",
+          message: `\`requires\` and \`decreases\` of the recursive function \`${m.name}\` may not call \`${callee.name?.text ?? "?"}\`, which is part of the same recursion`,
+          location: m.location,
+        });
       }
     }
-    color.set(decl, 2);
-    ordered.push(fn);
   };
 
-  for (const fn of allFunctions) {
-    if ((color.get(fn.decl) ?? 0) === 0) {
-      dfs(fn.decl, [fn.decl]);
-    }
+  for (const decl of nodes.keys()) {
+    if (!index.has(decl)) connect(decl);
   }
+  functions.push(...ordered);
+  ensuresList.unshift(...importedEnsures);
 
   const result: DialectAnalysis = {
     hasVerifiedDirective,
     diagnostics,
-    functions: ordered,
+    functions,
     laws,
     ensures: ensuresList,
   };

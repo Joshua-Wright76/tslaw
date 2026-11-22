@@ -51,7 +51,7 @@ Side conditions enforced by the subset check (stage 2):
 - Every `block` ends in a `return` on every path.
 - Conditions and the operands of `!`, `&&`, `||` have type `boolean`.
 - `f` in a call refers to a top-level function of a verified module; `implies` is the one exported by the tslaw runtime. Both are resolved through the type checker, never by name.
-- The call graph is acyclic (no recursion, direct or mutual).
+- A function that can reach itself through calls (directly or through others) is *recursive* and must declare a measure, `decreases(m1, ..., mk)`, directly after its `requires` statements. All functions of one recursion give the same number of measures, and their `requires` and `decreases` do not call into that recursion.
 - Parameter types contain no literal types.
 
 Everything else in TypeScript is rejected. In particular there is no assignment, no loop, no exception, no `number`, no `any`, no cast, and no reference to anything except parameters and local `const`s.
@@ -132,7 +132,7 @@ E |- e => v
 E |- return e; => v
 ```
 
-**Totality.** Every well-typed expression and block evaluates to exactly one value. Evaluation cannot get stuck (typing assumption), cannot throw (no operation in the subset throws on these types), and terminates (expressions are finite and the call graph is acyclic, so call depth is bounded by the number of functions).
+**Totality.** Every well-typed expression and block evaluates to at most one value. Evaluation cannot get stuck (typing assumption) and cannot throw (no operation in the subset throws on these types). Without recursion it always terminates: expressions are finite, and call depth is bounded by the number of functions. A recursive function terminates on the arguments that satisfy its `requires` when its termination goals (section 4, Recursion) are proved; that is what those goals are for.
 
 ## 4. Translation to SMT-LIB2
 
@@ -235,18 +235,71 @@ for all values of the enclosing parameters. `context` is everything known at tha
 | the else-branch, or the code after `if (c) return ...;` | `not c` |
 | the right operand of `a && ...` | `a` |
 | the right operand of `a || ...` | `not a` |
-| the second argument of `implies(p, ...)` | `p` |
+| the second argument of `implies(p, ...)`, in a law or postcondition | `p` |
 
-The first four rows match exactly when JavaScript evaluates the call. The last does not: `implies` is an ordinary function, so at runtime its second argument is evaluated even when `p` is false. That is harmless here because verified functions are total and `requires` does nothing at runtime, and it lets a law state a hypothesis in the natural way.
+The first four rows match exactly when JavaScript evaluates the call. The last does not: `implies` is an ordinary function, so at runtime its second argument is evaluated even when `p` is false. Laws and postconditions are never executed, so there the row lets a hypothesis be stated in the natural way. In a function body, a `requires` or a `decreases` (code that runs) the row does not apply: a call inside `implies(p, ...)` must satisfy its precondition whether or not `p` holds, since a recursive function called outside its precondition might not return.
 
 **Postconditions.** `ensures(f, (x1..xn, result) => post)` produces the query
 
 ```
 (assert pre_f(a1..an))
-(assert (not (let ((result (f' a1..an))) T[post])))
+(assert (not (let ((result T[block_f][xi -> ai])) T[post])))
 ```
 
+where the result is `f`'s translated body (the same value as `f' a1..an`; the Recursion section below says why the body is used).
+
 **What contracts add to the theorems.** Function calls are still translated through their definitions, so the theorems of section 6 hold whether or not the obligations are proved. If all call-site obligations in a module are `PROVED`, then additionally: in any evaluation that starts from a law, or from a function whose `requires` holds, every call reached under the conditions in the table above satisfies its callee's `requires`.
+
+### Recursion
+
+Functions are grouped by mutual recursion (the strongly connected components of the call graph), and groups are emitted callees first. A group that is not recursive is one `define-fun` as above. A recursive group `f1..fm` is emitted as
+
+```
+(define-fun pre_fi ...)                      ; when fi has requires
+(define-fun mes_fi_j ((p1 ...) ...) Int T[mj])   ; one per measure of fi
+(declare-fun undef_fi (...) T[U])            ; when fi has requires
+(define-funs-rec ((f1' ...) ... (fm' ...))
+  ((ite (pre_f1 p1..pn) T[block1] (undef_f1 p1..pn)) ...))
+```
+
+so a recursive function has its body's value where its precondition holds and an unspecified value elsewhere.
+
+`define-funs-rec` asserts that the functions satisfy their equations for all arguments. Unlike `define-fun`, that is an assumption: for a function that does not terminate, such as `f(n) = f(n) + 1n`, no such function exists and the assumption is contradictory, which would make every query `unsat`. The termination goals rule this out.
+
+**Termination goals.** Order integers by `a << b` iff `a < b and 0 <= b`, and tuples lexicographically by `<<`. Neither order has an infinite descending chain. For every call `g(e1..em)` in the body of a recursive function `f`, with `g` in the same group, one query claims
+
+```
+context  =>  (mes_g_1(args), ..., mes_g_k(args))  <<  (mes_f_1(p1..pn), ..., mes_f_k(p1..pn))
+```
+
+with `context` as for call-site obligations (it includes `pre_f`). In these queries the group's functions are *declared, not defined* (`declare-fun`), so the claim is proved for every possible meaning of the recursive calls and cannot rest on the definition it is meant to justify. Functions in groups below are defined as usual.
+
+*Why this suffices.* Suppose all termination goals of a group are proved. Consider the relation "evaluating `fi(v)` with `pre_fi(v)` reaches a call `fj(w)` with `pre_fj(w)`". By the goals, the measure of `(fj, w)` is below that of `(fi, v)` in a well-founded order, whatever values the inner calls return. So the equations define the functions by well-founded recursion: there is exactly one family of functions satisfying them on the arguments where the preconditions hold (a call whose precondition fails yields `undef`, which is not recursive). Hence the `define-funs-rec` assumption is satisfiable, and in every model the functions agree with evaluation wherever preconditions hold. Calls in untaken branches do not matter because `ite`, `and`, `or` and `=>` do not depend on the value of an operand that the conditions in the table rule out.
+
+**Postconditions as induction hypotheses.** For `ensures(f, post)` the query is
+
+```
+(assert pre_f(a1..an))
+(assert fact_1) ... (assert fact_k)
+(assert (not (let ((result T[block_f][xi -> ai])) T[post])))
+```
+
+The result is the translated body rather than a call. Each `fact` comes from a call `g(e1..em)` to a *recursive* function `g` that has postconditions, and reads
+
+```
+context  =>  (pre_g(args) => post_g(args, g'(args)))
+```
+
+Facts are generated for calls in the body of `f`, and for calls written in `post` itself only when `g` cannot reach `f` in the call graph. They are also generated for calls in laws, and in the bodies of functions when proving call-site obligations there.
+
+*Why this is sound.* Take all postconditions of one recursive group together and prove them by well-founded induction on the measure. For arguments `v` with `pre_f(v)`, every call to a group member in the body that is actually reached has a smaller measure (termination goals), so the induction hypothesis gives its postcondition, which is the fact. A call written in `post` is at arbitrary arguments, so no hypothesis applies; assuming the postcondition there would let `ensures(f, (n, r) => f(n) < 0n)` prove itself. Facts about a function `g` outside the group are not hypotheses but previously established results: `g`'s own postconditions are proved using only functions `g` can reach, so there is no cycle between groups.
+
+**Dependencies between verdicts.** A query that contains a recursive definition is meaningful only if that group's termination goals are `PROVED`, and a proof that asserts facts only if the corresponding `ensures` are `PROVED`. After solving, verdicts are adjusted until nothing changes:
+
+- A `PROVED` verdict with a dependency that is not `PROVED` is retried without facts; if that fails it becomes `UNKNOWN`.
+- A `DISPROVED` verdict becomes `UNKNOWN` if a termination goal it depends on is not `PROVED`. (A failed `ensures` does not affect it: removing an assumption cannot remove a counterexample.)
+
+Mutual dependencies among the postconditions of one group are allowed; they are the simultaneous induction above. Each query includes only the definitions its goal can reach, so an unfounded definition affects only what uses it. When a file imports recursive functions, their termination goals and any assumed postconditions are checked again as part of that file.
 
 ## 5. Verdicts
 
@@ -262,7 +315,9 @@ Let `enc` map values to SMT values: integers and booleans to themselves, and a r
 
 **Lemma (translation agrees with evaluation).** Let `e` be a well-typed expression of type `T`, `E` an environment whose values have the declared types, and `G` a term environment with `G(x)` denoting `enc(E(x))` for every variable. If `E |- e => v`, then in every SMT model that satisfies the function definitions, `T[e]G` denotes `enc(v)` at type `T`. The same holds for blocks.
 
-*Argument.* By induction on the call depth, then on the structure of `e`. Each translation rule in section 4 is the SMT-LIB counterpart of the evaluation rule in section 3 with the same shape: `Int` arithmetic and comparison in SMT-LIB are exact integer operations, which is what ECMAScript specifies for `bigint` `+ - * < <= > >=` and `===`; `ite`, `and`, `or`, `not`, `=>` and `let` have their standard meaning; datatype selectors return the constructor's arguments. The projection case uses that `enc` at a supertype is `enc` at the subtype followed by dropping fields. Function calls use the induction hypothesis on call depth, which is well-founded because the call graph is acyclic; `define-fun` is macro expansion, so the definitions are satisfiable and determine the functions uniquely.
+*Argument.* By induction on the call depth, then on the structure of `e`. Each translation rule in section 4 is the SMT-LIB counterpart of the evaluation rule in section 3 with the same shape: `Int` arithmetic and comparison in SMT-LIB are exact integer operations, which is what ECMAScript specifies for `bigint` `+ - * < <= > >=` and `===`; `ite`, `and`, `or`, `not`, `=>` and `let` have their standard meaning; datatype selectors return the constructor's arguments. The projection case uses that `enc` at a supertype is `enc` at the subtype followed by dropping fields. Function calls use the induction hypothesis on call depth. Without recursion that is well-founded because the call graph is acyclic, and `define-fun` is macro expansion, so the definitions are satisfiable and determine the functions uniquely. For recursive groups whose termination goals are proved, section 4 (Recursion) gives the same two facts on the arguments that satisfy the preconditions.
+
+Both theorems below are stated for final verdicts, after the dependency adjustment of section 4: every recursive function used has proved termination goals, and every assumed fact a proved `ensures`. For recursive functions they cover evaluations in which each call satisfies its callee's `requires` (the call-site obligations); outside its precondition a recursive function's value is unspecified in the model.
 
 **Theorem (PROVED is sound).** If Z3 answers `unsat` for a law's query, then for all values `v1 in V(T1), ..., vn in V(Tn)`, the law's body evaluates to `true`.
 
@@ -280,6 +335,6 @@ A `PROVED` verdict is only as trustworthy as each of these:
 2. **The implementation follows this document.** Checked by tests, not proved. `test/fuzz.test.ts` generates random programs in the subset, runs them in JavaScript, and requires the prover to agree; `test/soundness.test.ts` runs every proved law on random inputs and replays every counterexample.
 3. **TypeScript's type checker is sound on the subset** (section 2).
 4. **Z3 is correct**, including its answer `unsat`. With `--cross-check` this is weakened to "Z3 and cvc5 are not both wrong in the same way": cvc5 must independently reach the same verdict, and for `unsat` must produce a proof that its own proof checker accepts.
-5. **The JavaScript engine implements `bigint` and object semantics as specified.** A real engine also has finite memory: a `bigint` computation can throw `RangeError` when a value is too large to represent, which the model ignores.
+5. **The JavaScript engine implements `bigint` and object semantics as specified.** A real engine also has finite memory: a `bigint` computation can throw `RangeError` when a value is too large to represent, and a deep recursion can overflow the call stack. The model ignores both; a termination proof bounds neither depth nor time.
 6. **Callers respect the types.** The theorem quantifies over well-typed inputs. Unverified code that passes ill-typed values (through `any`, casts or plain JavaScript) is outside it. The wrappers generated by `tslaw guard` discharge this assumption at runtime for calls that go through them: they establish that each argument is a value of its declared type (as a fresh frozen copy) and that `pre_f` holds before calling `f`. The generator itself (`src/guard.ts`) is tested, not proved.
 7. **The law says what you meant.** tslaw proves the laws that are written, nothing more.

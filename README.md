@@ -102,6 +102,32 @@ ensures(withdraw, (acc, amount, result) => result.balance === acc.balance - amou
 - `ensures(fn, (...args, result) => cond)` is proved for all arguments that satisfy the function's `requires`.
 - Both do nothing at runtime, like `law`. They do not stop unverified code from calling the function with bad arguments; for that, see the next section.
 
+### Recursion
+
+A function may call itself (or a group of functions each other) if it states a measure that shrinks:
+
+```ts
+import { decreases, ensures, implies, law } from "tslaw/runtime";
+
+export function sum(n: bigint): bigint {
+  decreases(n);
+  if (n <= 0n) return 0n;
+  return n + sum(n - 1n);
+}
+
+ensures(sum, (n, result) => implies(n >= 0n, 2n * result === n * (n + 1n)));
+
+law("sum is never negative", (n: bigint) => sum(n) >= 0n);
+```
+
+- `decreases(m)` comes right after the `requires` statements. For every recursive call, tslaw proves that the callee's measure is strictly smaller than the caller's and that the caller's is at least zero, so the recursion cannot go on forever. This is reported as `"termination of sum: call to sum at line N"`. With several measures, `decreases(a, b)`, they are compared in order, so `b` may grow whenever `a` shrinks.
+- A recursive function without a measure is rejected. One whose measure cannot be proved to shrink is reported as `DISPROVED` or `UNKNOWN`, and every verdict that used its definition is withdrawn (`UNKNOWN`, "relies on ..."), because a definition that does not terminate can be used to prove anything.
+- **Properties for all inputs go in `ensures`.** Z3 does not do induction by itself. tslaw proves an `ensures` on a recursive function by assuming it for the recursive calls (which are at smaller measures) and proving it for the body: that is induction. Once proved, the postcondition is available at every call to the function, which is how the law above gets proved.
+- Laws about specific values, such as `sum(4n) === 10n`, are proved by unfolding the definition.
+- If an `ensures` fails, proofs that assumed it are retried without it and withdrawn if that does not work.
+
+Limits: only the `ensures` of the function being called are used, exactly at its call sites, so a property that needs a cleverer induction has to be restated as an `ensures` of a helper. Deep recursion can still overflow the JavaScript stack at runtime; a termination proof says the recursion ends, not that it fits.
+
 ### Guarding the boundary
 
 Proofs cover calls from verified code. Anything else (plain JavaScript, values typed `any`, parsed JSON) can still call a verified function with arguments that break its types or its `requires`. `tslaw guard` generates a checked entry point for those callers:
@@ -138,16 +164,17 @@ Each file goes through three stages. A failure at any stage stops that file.
 **Code**
 
 - Top level: `type`/`interface` declarations, function declarations, and `law(name, predicate)` / `ensures(fn, postcondition)` calls.
+- Recursion, direct or mutual, with a `decreases(...)` measure.
 - Functions need explicit parameter and return types.
 - `const` bindings (including object destructuring), `if`/`else` where every path returns, ternaries.
 - Operators: `+ - *`, comparisons, `===`/`!==` on `bigint` and `boolean`, `&& || !`.
 - Calls to other verified functions, and `implies(p, q)`.
-- Imports: `law`, `implies`, `requires`, `ensures` from `tslaw/runtime`, types from anywhere, and functions from other `"use verified";` modules.
+- Imports: `law`, `implies`, `requires`, `ensures`, `decreases` from `tslaw/runtime`, types from anywhere, and functions from other `"use verified";` modules.
 
 **Not allowed**
 
 - `number` (floating point cannot be modeled exactly; use `bigint`), `any`, `unknown`, `null`/`undefined`, unions, arrays, tuples, strings.
-- `let`/`var`, assignment, loops, recursion, `throw`/`try`, `async`, generics, classes.
+- `let`/`var`, assignment, loops (use recursion), `throw`/`try`, `async`, generics, classes.
 - Casts (`as`, `!`) and `@ts-ignore`-style comments.
 - `/` and `%` (JavaScript rounds toward zero and Z3 does not; not yet supported).
 - `===` on records (JavaScript compares identity, not contents; compare fields instead).
@@ -205,11 +232,12 @@ Codes starting with `TS` come from the TypeScript compiler. The rest are tslaw's
 | `LAW029` | Function or law body does not return on every path. |
 | `LAW030` | Malformed `law(...)`: needs a string literal name and a non-async function. |
 | `LAW031` | Unsupported top-level statement. |
-| `LAW032` | Recursion (direct or through other functions). |
+| `LAW032` | A recursive function (direct or through other functions) without a `decreases(...)` measure. |
 | `LAW033` | `@ts-ignore`, `@ts-expect-error`, or `@ts-nocheck` comment. |
 | `LAW034` | A non-`boolean` (such as a `bigint`) used as a condition or as an operand of `!`, `&&`, `||`. |
 | `LAW035` | `requires(...)` that is not at the start of a function body, or with the wrong arguments. |
 | `LAW036` | Malformed `ensures(...)`: needs a verified function and a callback taking its parameters plus the result. |
+| `LAW037` | Malformed `decreases(...)`: not directly after the `requires` statements, repeated, a non-`bigint` measure, a different number of measures than the other functions in the same recursion, or a `requires`/`decreases` that calls the recursion itself. |
 | `LAW040` | `tslaw guard` cannot generate a wrapper: the module is not verified, or a `requires` calls a function that is not exported. |
 | `LAW090` | Internal: translation to SMT failed. Please report it. |
 

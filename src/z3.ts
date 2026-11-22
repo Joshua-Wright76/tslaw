@@ -135,6 +135,9 @@ export function runCvc5(
       "--lang", "smt2", "-q",
       `--tlimit=${Math.max(1, Math.ceil(options.timeoutMs))}`,
       "--produce-models", "--check-proofs", "--check-models",
+      // Without this cvc5 cannot find counterexamples that involve recursive functions. It
+      // assumes those functions terminate, which the termination goals establish separately.
+      ...(lowered.smtScript.includes("(define-funs-rec ") ? ["--fmf-fun"] : []),
     ],
     timeoutMs: options.timeoutMs,
     installHint:

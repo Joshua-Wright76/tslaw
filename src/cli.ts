@@ -207,7 +207,7 @@ async function main(): Promise<void> {
       if (l.status === "proved") {
         console.log(`  PROVED    "${l.name}" (${time})`);
       } else if (l.status === "disproved") {
-        console.log(`  DISPROVED "${l.name}" (${time}) at ${label}:${l.location.line}`);
+        console.log(`  DISPROVED "${l.name}" (${time}) at ${rel(l.location.file)}:${l.location.line}`);
         if (l.counterexample && l.counterexample.length > 0) {
           const vals = l.counterexample.map((c) => `${c.name} = ${c.value}`).join(", ");
           console.log(`            Counterexample: ${vals}`);

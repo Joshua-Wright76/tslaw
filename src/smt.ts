@@ -22,8 +22,11 @@ export interface RecordDef {
   }>;
 }
 
-/** What a query proves: a user law, a postcondition, or a call site's precondition. */
-export type GoalKind = "law" | "ensures" | "requires";
+/**
+ * What a query proves: a user law, a postcondition, a call site's precondition, or that a
+ * recursive call makes the termination measure smaller.
+ */
+export type GoalKind = "law" | "ensures" | "requires" | "decreases";
 
 export interface Goal {
   readonly name: string;
@@ -41,6 +44,17 @@ export interface LoweredLaw {
     readonly type: VType;
   }>;
   readonly recordsByCtor: ReadonlyMap<string, RecordDef>;
+  /**
+   * Indices (into the returned list) of goals this one relies on: the termination of every
+   * recursive function whose definition the query uses, and every postcondition it assumes.
+   * A PROVED verdict only stands if all of them are PROVED too.
+   */
+  readonly dependsOn: ReadonlyArray<number>;
+  /**
+   * The same goal without the assumed postconditions (present when there are any). If one of
+   * those postconditions turns out not to hold, the goal may still be provable this way.
+   */
+  readonly plain?: { readonly smtScript: string; readonly dependsOn: ReadonlyArray<number> };
 }
 
 /**
@@ -129,7 +143,10 @@ export function lowerModuleLaws(
   functions: ReadonlyArray<VerifiedFunction>,
   laws: ReadonlyArray<VerifiedLaw>,
   ensures: ReadonlyArray<VerifiedEnsures> = [],
-  /** Emit call-site obligations only for functions declared in this file (default: all). */
+  /**
+   * Emit goals only for this file's declarations (default: all), plus whatever goals of
+   * imported modules those rely on.
+   */
   localFile?: ts.SourceFile,
 ): LoweredLaw[] {
   const registry = new RecordRegistry();
@@ -154,6 +171,72 @@ export function lowerModuleLaws(
   });
   const app = (name: string, args: ReadonlyArray<string>): string =>
     args.length > 0 ? `(${name} ${args.join(" ")})` : name;
+  const fnByDecl = new Map(functions.map((fn) => [fn.decl, fn]));
+  const isLocal = (file: string): boolean => !localFile || localFile.fileName === file;
+
+  // -------------------------------------------------------------------------
+  // Groups of mutually recursive functions ("units"), callees first.
+  // -------------------------------------------------------------------------
+  const unitOf = new Map<ts.FunctionDeclaration, number>();
+  const unitMembers: VerifiedFunction[][] = [];
+  for (const fn of functions) {
+    const last = unitMembers[unitMembers.length - 1];
+    if (last && last[0]!.scc === fn.scc) last.push(fn);
+    else unitMembers.push([fn]);
+    unitOf.set(fn.decl, unitMembers.length - 1);
+  }
+  const unitRecursive = unitMembers.map((members) => members[0]!.recursive);
+  const reachCache = new Map<number, ReadonlySet<number>>();
+  /** The unit itself and every unit its functions call, directly or not. */
+  const reach = (unit: number): ReadonlySet<number> => {
+    const cached = reachCache.get(unit);
+    if (cached) return cached;
+    const out = new Set<number>([unit]);
+    reachCache.set(unit, out);
+    for (const fn of unitMembers[unit]!) {
+      for (const callee of fn.calls) {
+        const u = unitOf.get(callee);
+        if (u === undefined || u === unit) continue;
+        for (const r of reach(u)) out.add(r);
+      }
+    }
+    return out;
+  };
+
+  /** Termination measure of a recursive function: one SMT function per `decreases` argument. */
+  const measureNames = new Map<ts.FunctionDeclaration, string[]>();
+  functions.forEach((fn, i) => {
+    if (fn.recursive) measureNames.set(fn.decl, fn.decreases.map((_, k) => `mes_${i}_${k}`));
+  });
+  /**
+   * `callee` is smaller than `caller` in the lexicographic order where an integer `a` is below
+   * `b` when `a < b` and `b >= 0`. That order has no infinite descending chain.
+   */
+  const lexLess = (callee: ReadonlyArray<string>, caller: ReadonlyArray<string>): string => {
+    if (callee.length !== caller.length || callee.length === 0) {
+      throw new Error("Mutually recursive functions must have measures of the same length");
+    }
+    const at = (i: number): string => {
+      const a = callee[i]!;
+      const b = caller[i]!;
+      const below = `(and (< ${a} ${b}) (<= 0 ${b}))`;
+      return i === callee.length - 1 ? below : `(or ${below} (and (= ${a} ${b}) ${at(i + 1)}))`;
+    };
+    return at(0);
+  };
+
+  /** Postconditions by function, as indices into `ensures`. */
+  const ensuresOf = new Map<ts.FunctionDeclaration, number[]>();
+  ensures.forEach((e, j) => {
+    const list = ensuresOf.get(e.fn) ?? [];
+    list.push(j);
+    ensuresOf.set(e.fn, list);
+  });
+  /** `post_<j>(args..., result)`: defined for postconditions of recursive functions. */
+  const postDefs = new Map<
+    number,
+    { readonly name: string; readonly text: string; readonly used: ReadonlySet<ts.FunctionDeclaration> }
+  >();
 
   // -------------------------------------------------------------------------
   // Call-site obligations
@@ -167,12 +250,58 @@ export function lowerModuleLaws(
     | { readonly kind: "let"; readonly v: string; readonly init: string }
     | { readonly kind: "assume"; readonly cond: string };
   interface Obligation {
+    readonly kind: "requires" | "decreases";
     readonly callee: string;
     readonly node: ts.Node;
     readonly formula: string;
   }
   const frames: Frame[] = [];
   let sink: Obligation[] = [];
+  /** Functions called by the code being lowered. */
+  let used = new Set<ts.FunctionDeclaration>();
+  /** Set while lowering the body of a recursive function: its group and its own measure. */
+  let recursion: { readonly unit: number; readonly measure: ReadonlyArray<string> } | undefined;
+  /**
+   * Set while lowering a goal that may use proved postconditions of recursive functions. Each
+   * call to such a function adds "under the conditions at this point, the callee's
+   * precondition implies its postcondition for these arguments" to `facts`.
+   *
+   * This is how induction happens: the solver does not do induction by itself, so a property
+   * of a recursive function is stated as `ensures`, proved once with the postcondition assumed
+   * at the (smaller) recursive calls, and then available wherever the function is called.
+   */
+  interface FactScope {
+    allowed: (callee: VerifiedFunction, ensuresIndex: number) => boolean;
+    readonly facts: string[];
+    readonly posts: Set<number>;
+    /** A second, narrower selection collected alongside (see the termination goals). */
+    readonly strict?: {
+      readonly allowed: (callee: VerifiedFunction, ensuresIndex: number) => boolean;
+      readonly facts: string[];
+      readonly posts: Set<number>;
+    };
+  }
+  let factScope: FactScope | undefined;
+  /** True while lowering code that runs (function bodies, `requires`, `decreases`). */
+  let executable = false;
+  const asExecutable = <T>(fn: () => T): T => {
+    const saved = executable;
+    executable = true;
+    try {
+      return fn();
+    } finally {
+      executable = saved;
+    }
+  };
+  const withFacts = <T>(scope: FactScope | undefined, fn: () => T): T => {
+    const saved = factScope;
+    factScope = scope;
+    try {
+      return fn();
+    } finally {
+      factScope = saved;
+    }
+  };
   const closeOver = (body: string): string =>
     frames.reduceRight(
       (acc, f) => (f.kind === "let" ? `(let ((${f.v} ${f.init})) ${acc})` : `(=> ${f.cond} ${acc})`),
@@ -199,8 +328,6 @@ export function lowerModuleLaws(
     registry.register(res.type);
     return res.type;
   };
-
-  const fnByDecl = new Map(functions.map((fn) => [fn.decl, fn]));
 
   /**
    * Convert an SMT value of record type `from` into record type `to` by dropping extra fields.
@@ -355,11 +482,15 @@ export function lowerModuleLaws(
         if (expr.arguments.length !== 2 || !premiseExpr || !conclusionExpr) {
           throw new Error("`implies` requires exactly 2 arguments");
         }
-        // The conclusion is only meaningful when the premise holds, so calls inside it need
-        // their preconditions only then. (At runtime both sides are evaluated, which is
-        // harmless: verified functions are total and `requires` does nothing at runtime.)
+        // In a law or postcondition the conclusion is only meaningful when the premise holds,
+        // so calls inside it need their preconditions only then. Code in a function body
+        // really runs, and JavaScript evaluates both arguments of `implies` whatever the
+        // premise is, so there the calls must be justified unconditionally: a recursive
+        // function called outside its precondition might never return.
         const premise = lowerExpr(premiseExpr, env);
-        const conclusion = assuming(premise, () => lowerExpr(conclusionExpr, env));
+        const conclusion = executable
+          ? lowerExpr(conclusionExpr, env)
+          : assuming(premise, () => lowerExpr(conclusionExpr, env));
         return `(=> ${premise} ${conclusion})`;
       }
       if (callee.kind !== "function") {
@@ -373,12 +504,44 @@ export function lowerModuleLaws(
       if (expr.arguments.length !== calleeFn.params.length) {
         throw new Error(`Wrong number of arguments in call to \`${fnName}\``);
       }
+      used.add(callee.decl);
       const args = expr.arguments.map((a, i) => lowerExpr(a, env, calleeFn.params[i]!.type));
+      const call = app(target, args);
       const pre = preSmtNames.get(callee.decl);
       if (pre) {
-        sink.push({ callee: calleeFn.name, node: expr, formula: closeOver(app(pre, args)) });
+        sink.push({
+          kind: "requires",
+          callee: calleeFn.name,
+          node: expr,
+          formula: closeOver(app(pre, args)),
+        });
       }
-      return app(target, args);
+      if (recursion && unitOf.get(callee.decl) === recursion.unit) {
+        const calleeMeasure = (measureNames.get(callee.decl) ?? []).map((m) => app(m, args));
+        sink.push({
+          kind: "decreases",
+          callee: calleeFn.name,
+          node: expr,
+          formula: closeOver(lexLess(calleeMeasure, recursion.measure)),
+        });
+      }
+      if (factScope && calleeFn.recursive) {
+        for (const j of ensuresOf.get(callee.decl) ?? []) {
+          const post = postDefs.get(j);
+          if (!post) continue;
+          const holds = app(post.name, [...args, call]);
+          const fact = closeOver(pre ? `(=> ${app(pre, args)} ${holds})` : holds);
+          if (factScope.allowed(calleeFn, j)) {
+            factScope.facts.push(fact);
+            factScope.posts.add(j);
+          }
+          if (factScope.strict?.allowed(calleeFn, j)) {
+            factScope.strict.facts.push(fact);
+            factScope.strict.posts.add(j);
+          }
+        }
+      }
+      return call;
     }
 
     throw new Error(`Unsupported expression in SMT lowering: ${ts.SyntaxKind[expr.kind]}`);
@@ -475,15 +638,21 @@ export function lowerModuleLaws(
     return lowerExpr(body, env, ret);
   };
 
-  /** Run `fn` and return the call-site obligations it emitted. */
-  const collecting = (fn: () => void): Obligation[] => {
-    const saved = sink;
+  interface Trace {
+    readonly obligations: Obligation[];
+    readonly used: Set<ts.FunctionDeclaration>;
+  }
+  /** Run `fn` and return the call-site obligations it emitted and the functions it called. */
+  const collecting = (fn: () => void): Trace => {
+    const saved = { sink, used };
     sink = [];
+    used = new Set();
     try {
       fn();
-      return sink;
+      return { obligations: sink, used };
     } finally {
-      sink = saved;
+      sink = saved.sink;
+      used = saved.used;
     }
   };
 
@@ -496,20 +665,84 @@ export function lowerModuleLaws(
     readonly assumptions: ReadonlyArray<string>;
     /** The claim; the query asserts its negation. */
     readonly claim: string;
+    /** Functions the query mentions; their definitions (and their callees') are included. */
+    readonly roots: ReadonlySet<ts.FunctionDeclaration>;
+    /** Postconditions of recursive functions the query assumes. */
+    readonly posts: ReadonlySet<number>;
+    /** `defs` and `assumptions` without those postconditions, when there are any. */
+    readonly plain?: { readonly defs: ReadonlyArray<string>; readonly assumptions: ReadonlyArray<string> };
+    /**
+     * A recursive group that this query must not assume anything about: its functions are
+     * declared without a definition. Used for the goals that justify the definition itself.
+     */
+    readonly opaque?: number;
+    /** False for goals of imported modules, which are emitted only if something needs them. */
+    readonly local: boolean;
   }
   const pending: Pending[] = [];
   let obligationId = 0;
+  /** For each recursive group, the goals (indices into `pending`) that prove it terminates. */
+  const terminationGoals = new Map<number, number[]>();
+  /** For each postcondition, the goal (index into `pending`) that proves it. */
+  const ensuresGoals = new Map<number, number>();
 
   const argNamesFor = (params: ReadonlyArray<VerifiedParam>) =>
     params.map((p, i) => ({ tsName: p.name, smtName: smtIdent(`arg_${i}`, p.name), type: p.type }));
-  const obligationGoal = (ob: Obligation, params: ReadonlyArray<VerifiedParam>): Goal => {
+  const obligationGoal = (
+    ob: Obligation,
+    params: ReadonlyArray<VerifiedParam>,
+    caller?: string,
+  ): Goal => {
     const location = getLocation(ob.node.getSourceFile(), ob.node);
-    return { name: `requires of ${ob.callee} at line ${location.line}`, params, location };
+    const name =
+      ob.kind === "requires"
+        ? `requires of ${ob.callee} at line ${location.line}`
+        : `termination of ${caller ?? ob.callee}: call to ${ob.callee} at line ${location.line}`;
+    return { name, params, location };
   };
+  const withFactsAssumed = (facts: ReadonlyArray<string>, formula: string): string =>
+    facts.length === 0 ? formula : `(=> (and true ${facts.join(" ")}) ${formula})`;
 
-  // Lower all functions first (which also discovers any inline record types used inside bodies).
-  const fnDefs: string[] = [];
-  for (const fn of functions) {
+  // Postconditions of recursive functions, as predicates over the arguments and the result.
+  ensures.forEach((e, j) => {
+    const fn = fnByDecl.get(e.fn);
+    if (!fn) throw new Error(`\`ensures\` refers to unknown function \`${e.fnName}\``);
+    if (e.params.length !== fn.params.length + 1) {
+      throw new Error(`Postcondition of \`${e.fnName}\` has the wrong number of parameters`);
+    }
+    if (!fn.recursive) return;
+    const env = new Map<string, string>();
+    const sig = [...fn.params.map((p) => p.type), fn.returnType].map((type, i) => {
+      const callbackParam = e.params[i]!;
+      const smtName = smtIdent(`q_${i}`, callbackParam.name);
+      env.set(callbackParam.name, project(smtName, type, callbackParam.type));
+      return `(${smtName} ${registry.register(type)})`;
+    });
+    let body = "";
+    const trace = collecting(() => {
+      body = withFacts(undefined, () => lowerBody(e.body, env, { kind: "boolean" }));
+    });
+    const name = `post_${j}`;
+    postDefs.set(j, {
+      name,
+      text: `(define-fun ${name} (${sig.join(" ")}) Bool\n  ${body})`,
+      used: trace.used,
+    });
+  });
+
+  // Lower all functions (which also discovers any inline record types used inside bodies).
+  interface Unit {
+    /** Definitions of the group's functions. */
+    readonly def: string[];
+    /** The same functions declared without definitions (preconditions and measures kept). */
+    readonly opaque: string[];
+  }
+  const units: Unit[] = unitMembers.map(() => ({ def: [], opaque: [] }));
+  const recSigs = new Map<number, string[]>();
+  const recBodies = new Map<number, string[]>();
+
+  functions.forEach((fn, fnIdx) => {
+    const unit = unitOf.get(fn.decl)!;
     const env = new Map<string, string>();
     const paramNames: string[] = [];
     const paramsSmt = fn.params.map((p, i) => {
@@ -518,155 +751,360 @@ export function lowerModuleLaws(
       paramNames.push(smtName);
       return `(${smtName} ${registry.register(p.type)})`;
     });
+    const sorts = fn.params.map((p) => registry.register(p.type));
     const retSort = registry.register(fn.returnType);
+    const fnSmt = fnSmtNames.get(fn.decl)!;
+    const pre = preSmtNames.get(fn.decl);
+    const measures = measureNames.get(fn.decl) ?? [];
+    const specDefs: string[] = [];
+
+    // Precondition goals inside this function may use the postconditions of every recursive
+    // function it calls, itself included: postconditions are proved without relying on them.
+    //
+    // Termination goals are what make a recursive definition meaningful in the first place, so
+    // they must not rest on that definition. They treat this function's group as unknown
+    // functions and use only postconditions that lie strictly below it in the call graph
+    // (including everything those postconditions mention).
+    const below = (decl: ts.FunctionDeclaration): boolean => {
+      const u = unitOf.get(decl);
+      return u !== undefined && !reach(u).has(unit);
+    };
+    const scope = {
+      allowed: () => true,
+      facts: [] as string[],
+      posts: new Set<number>(),
+      strict: {
+        allowed: (callee: VerifiedFunction, j: number) =>
+          below(callee.decl) && [...postDefs.get(j)!.used].every(below),
+        facts: [] as string[],
+        posts: new Set<number>(),
+      },
+    } satisfies FactScope;
 
     // Preconditions first: each may rely on the ones before it, and the body on all of them.
     let bodySmt = "";
-    const obligations = collecting(() => {
+    const trace = collecting(() => {
       const pres: string[] = [];
       const lowerRest = (i: number): void => {
         const req = fn.requires[i];
-        if (!req) {
-          bodySmt = lowerBody(fn.body, env, fn.returnType, fn.requires.length);
+        if (req) {
+          const term = lowerExpr(req, env);
+          pres.push(term);
+          assuming(term, () => lowerRest(i + 1));
           return;
         }
-        const term = lowerExpr(req, env);
-        pres.push(term);
-        assuming(term, () => lowerRest(i + 1));
+        if (fn.recursive) {
+          fn.decreases.forEach((m, k) => {
+            specDefs.push(
+              `(define-fun ${measures[k]!} (${paramsSmt.join(" ")}) Int\n  ${lowerExpr(m, env)})`,
+            );
+          });
+          recursion = { unit, measure: measures.map((m) => app(m, paramNames)) };
+        }
+        try {
+          bodySmt = lowerBody(fn.body, env, fn.returnType, fn.prefixLength);
+        } finally {
+          recursion = undefined;
+        }
       };
-      lowerRest(0);
-      const pre = preSmtNames.get(fn.decl);
+      withFacts(scope, () => asExecutable(() => lowerRest(0)));
       if (pre) {
-        fnDefs.push(
+        specDefs.unshift(
           `(define-fun ${pre} (${paramsSmt.join(" ")}) Bool\n  ${pres.length === 1 ? pres[0] : `(and ${pres.join(" ")})`})`,
         );
       }
     });
-    fnDefs.push(
-      `(define-fun ${fnSmtNames.get(fn.decl)!} (${paramsSmt.join(" ")}) ${retSort}\n  ${bodySmt})`,
-    );
 
-    if (localFile && fn.decl.getSourceFile() !== localFile) continue;
+    const u = units[unit]!;
+    u.def.push(...specDefs);
+    u.opaque.push(...specDefs, `(declare-fun ${fnSmt} (${sorts.join(" ")}) ${retSort})`);
+    if (fn.recursive) {
+      // Outside its precondition a recursive function has an arbitrary value. This keeps the
+      // definition well-founded: the termination goals only cover arguments that satisfy it.
+      let body = bodySmt;
+      if (pre) {
+        const undef = `undef_${fnIdx}`;
+        u.def.push(`(declare-fun ${undef} (${sorts.join(" ")}) ${retSort})`);
+        body = `(ite ${app(pre, paramNames)} ${bodySmt} ${app(undef, paramNames)})`;
+      }
+      const sigs = recSigs.get(unit) ?? [];
+      const bodies = recBodies.get(unit) ?? [];
+      sigs.push(`(${fnSmt} (${paramsSmt.join(" ")}) ${retSort})`);
+      bodies.push(body);
+      recSigs.set(unit, sigs);
+      recBodies.set(unit, bodies);
+    } else {
+      u.def.push(`(define-fun ${fnSmt} (${paramsSmt.join(" ")}) ${retSort}\n  ${bodySmt})`);
+    }
+
     // Obligation formulas mention the function's parameters, so each becomes a predicate over
     // them, claimed for all arguments. The enclosing `requires` are already inside the formula.
+    const local = isLocal(fn.decl.getSourceFile().fileName);
     const argNames = argNamesFor(fn.params);
-    for (const ob of obligations) {
+    for (const ob of trace.obligations) {
+      // Preconditions of calls in imported modules are checked with those modules. Their
+      // termination is checked here too if needed, because definitions here rely on it.
+      if (!local && ob.kind === "requires") continue;
       const name = `ob_${obligationId++}`;
+      const definitional = ob.kind === "decreases";
+      const known = definitional ? scope.strict : scope;
+      if (definitional) {
+        const goals = terminationGoals.get(unit) ?? [];
+        goals.push(pending.length);
+        terminationGoals.set(unit, goals);
+      }
       pending.push({
-        kind: "requires",
-        goal: obligationGoal(ob, fn.params),
+        kind: ob.kind,
+        goal: obligationGoal(ob, fn.params, fn.name),
         argNames,
-        defs: [`(define-fun ${name} (${paramsSmt.join(" ")}) Bool\n  ${ob.formula})`],
+        defs: [
+          `(define-fun ${name} (${paramsSmt.join(" ")}) Bool\n  ${withFactsAssumed(known.facts, ob.formula)})`,
+        ],
         assumptions: [],
         claim: app(name, argNames.map((a) => a.smtName)),
+        roots: new Set([fn.decl]),
+        posts: known.posts,
+        ...(known.facts.length > 0
+          ? {
+              plain: {
+                defs: [`(define-fun ${name} (${paramsSmt.join(" ")}) Bool\n  ${ob.formula})`],
+                assumptions: [],
+              },
+            }
+          : {}),
+        ...(definitional ? { opaque: unit } : {}),
+        local,
       });
     }
+  });
+  for (const [unit, sigs] of recSigs) {
+    units[unit]!.def.push(
+      `(define-funs-rec (${sigs.join("\n                  ")})\n  (${recBodies.get(unit)!.join("\n   ")}))`,
+    );
   }
 
   for (const l of laws) {
     const env = new Map<string, string>();
     const argNames = argNamesFor(l.params);
     for (const a of argNames) env.set(a.tsName, a.smtName);
+    const scope: FactScope = { allowed: () => true, facts: [], posts: new Set() };
     let bodySmt = "";
-    const obligations = collecting(() => {
-      bodySmt = lowerBody(l.body, env, { kind: "boolean" });
+    const trace = collecting(() => {
+      bodySmt = withFacts(scope, () => lowerBody(l.body, env, { kind: "boolean" }));
     });
-    for (const ob of obligations) {
+    const local = isLocal(l.location.file);
+    const plain = scope.facts.length > 0 ? { plain: { defs: [], assumptions: [] } } : {};
+    for (const ob of trace.obligations) {
       pending.push({
         kind: "requires",
         goal: obligationGoal(ob, l.params),
         argNames,
         defs: [],
-        assumptions: [],
+        assumptions: scope.facts,
         claim: ob.formula,
+        roots: trace.used,
+        posts: scope.posts,
+        ...plain,
+        local,
       });
     }
-    pending.push({ kind: "law", goal: l, argNames, defs: [], assumptions: [], claim: bodySmt });
+    pending.push({
+      kind: "law",
+      goal: l,
+      argNames,
+      defs: [],
+      assumptions: scope.facts,
+      claim: bodySmt,
+      roots: trace.used,
+      posts: scope.posts,
+      ...plain,
+      local,
+    });
   }
 
   const ensuresCount = new Map<ts.FunctionDeclaration, number>();
-  for (const e of ensures) {
-    const fnSmt = fnSmtNames.get(e.fn);
-    const fn = functions.find((f) => f.decl === e.fn);
-    if (!fnSmt || !fn) throw new Error(`\`ensures\` refers to unknown function \`${e.fnName}\``);
-    if (e.params.length !== fn.params.length + 1) {
-      throw new Error(`Postcondition of \`${e.fnName}\` has the wrong number of parameters`);
-    }
+  ensures.forEach((e, j) => {
+    const fn = fnByDecl.get(e.fn)!;
+    const unit = unitOf.get(e.fn)!;
     const n = (ensuresCount.get(e.fn) ?? 0) + 1;
     ensuresCount.set(e.fn, n);
 
+    // The arguments have the function's own parameter types; the callback may name them
+    // differently and (with an annotation) view a record through a narrower type.
     const inputs = e.params.slice(0, -1);
     const resultParam = e.params[e.params.length - 1]!;
-    const env = new Map<string, string>();
-    const argNames = argNamesFor(inputs);
-    for (const a of argNames) env.set(a.tsName, a.smtName);
+    const argNames = fn.params.map((p, i) => ({
+      tsName: inputs[i]!.name,
+      smtName: smtIdent(`arg_${i}`, inputs[i]!.name),
+      type: p.type,
+    }));
     const args = argNames.map((a) => a.smtName);
+    const bodyEnv = new Map(fn.params.map((p, i) => [p.name, args[i]!]));
+    const postEnv = new Map(
+      inputs.map((p, i) => [p.name, project(args[i]!, fn.params[i]!.type, p.type)]),
+    );
     const pre = preSmtNames.get(e.fn);
-    const assumptions = pre ? [app(pre, args)] : [];
-    const result = nextVar("result");
-    env.set(resultParam.name, result);
-    const resultInit = app(fnSmt, args);
+    const preTerm = pre ? app(pre, args) : undefined;
+    const underPre = (fn_: () => void): void => {
+      if (preTerm) assuming(preTerm, fn_);
+      else fn_();
+    };
 
-    let postSmt = "";
-    const obligations = collecting(() => {
-      const lowerPost = (): void => {
-        under({ kind: "let", v: result, init: resultInit }, () => {
-          postSmt = lowerBody(e.body, env, { kind: "boolean" });
-        });
-      };
-      if (pre) assuming(app(pre, args), lowerPost);
-      else lowerPost();
+    // The result is the function's body, not a call to it, so that the postconditions of the
+    // calls inside the body can be assumed: those of functions below it because they are
+    // proved separately, and those of recursive calls because the measure is smaller there
+    // (the induction hypothesis).
+    const scope: FactScope = { allowed: () => true, facts: [], posts: new Set() };
+    let resultInit = "";
+    const bodyTrace = collecting(() => {
+      withFacts(scope, () =>
+        underPre(() => {
+          resultInit = asExecutable(() =>
+            lowerBody(fn.body, bodyEnv, fn.returnType, fn.prefixLength),
+          );
+        }),
+      );
     });
-    for (const ob of obligations) {
-      pending.push({
-        kind: "requires",
-        goal: obligationGoal(ob, inputs),
-        argNames,
-        defs: [],
-        assumptions: [],
-        claim: ob.formula,
-      });
+
+    // Calls written in the postcondition itself are at arbitrary arguments, so no induction
+    // hypothesis applies to them: only functions that cannot reach this one may be assumed.
+    scope.allowed = (callee) => !reach(unitOf.get(callee.decl)!).has(unit);
+    const result = nextVar("result");
+    postEnv.set(resultParam.name, project(result, fn.returnType, resultParam.type));
+    let postSmt = "";
+    const postTrace = collecting(() => {
+      withFacts(scope, () =>
+        underPre(() =>
+          under({ kind: "let", v: result, init: resultInit }, () => {
+            postSmt = lowerBody(e.body, postEnv, { kind: "boolean" });
+          }),
+        ),
+      );
+    });
+
+    const local = isLocal(e.location.file);
+    const params = inputs.map((p, i) => ({ name: p.name, type: fn.params[i]!.type }));
+    const roots = new Set([e.fn, ...bodyTrace.used, ...postTrace.used]);
+    const plain =
+      scope.facts.length > 0
+        ? { plain: { defs: [], assumptions: preTerm ? [preTerm] : [] } }
+        : {};
+    if (local) {
+      for (const ob of postTrace.obligations) {
+        pending.push({
+          kind: "requires",
+          goal: obligationGoal(ob, params),
+          argNames,
+          defs: [],
+          assumptions: scope.facts,
+          claim: ob.formula,
+          roots,
+          posts: scope.posts,
+          ...plain,
+          local,
+        });
+      }
     }
+    ensuresGoals.set(j, pending.length);
     pending.push({
       kind: "ensures",
       goal: {
         name: `ensures ${e.fnName}${n > 1 ? ` #${n}` : ""}`,
-        params: inputs,
+        params,
         location: e.location,
       },
       argNames,
       defs: [],
-      assumptions,
+      assumptions: [...(preTerm ? [preTerm] : []), ...scope.facts],
       claim: `(let ((${result} ${resultInit})) ${postSmt})`,
+      roots,
+      posts: scope.posts,
+      ...plain,
+      local,
     });
-  }
+  });
 
   const datatypeDecls = registry.emitDeclarations();
   const recordsByCtor = registry.byCtorMap();
 
-  return pending.map(({ kind, goal, argNames, defs, assumptions, claim }) => {
+  // Each query contains only the definitions it mentions, so a recursive function elsewhere
+  // in the module cannot affect it.
+  const assemble = (
+    p: Pending,
+    defs: ReadonlyArray<string>,
+    assumptions: ReadonlyArray<string>,
+    posts: ReadonlySet<number>,
+  ): { script: string; deps: Set<number> } => {
+    const included = new Set<number>();
+    const include = (decl: ts.FunctionDeclaration): void => {
+      const u = unitOf.get(decl);
+      if (u !== undefined) for (const r of reach(u)) included.add(r);
+    };
+    for (const decl of p.roots) include(decl);
+    for (const j of posts) for (const decl of postDefs.get(j)!.used) include(decl);
+
+    const fnDefs: string[] = [];
+    const deps = new Set<number>();
+    for (const u of [...included].sort((a, b) => a - b)) {
+      if (u === p.opaque) {
+        fnDefs.push(...units[u]!.opaque);
+        continue;
+      }
+      fnDefs.push(...units[u]!.def);
+      if (unitRecursive[u]) for (const g of terminationGoals.get(u) ?? []) deps.add(g);
+    }
+    for (const j of posts) deps.add(ensuresGoals.get(j)!);
+
     const lines: string[] = [
       // JSON-quoted: a raw newline in the name would end the comment and inject SMT commands.
-      `; tslaw ${kind}: ${JSON.stringify(goal.name)}`,
+      `; tslaw ${p.kind}: ${JSON.stringify(p.goal.name)}`,
       "(set-option :produce-models true)",
       ...datatypeDecls,
       ...fnDefs,
+      ...[...posts].sort((a, b) => a - b).map((j) => postDefs.get(j)!.text),
       ...defs,
-      ...argNames.map((p) => `(declare-const ${p.smtName} ${registry.register(p.type)})`),
+      ...p.argNames.map((a) => `(declare-const ${a.smtName} ${registry.register(a.type)})`),
       ...assumptions.map((a) => `(assert ${a})`),
       `; Assert negation: unsat => the claim holds for ALL inputs`,
-      `(assert (not ${claim}))`,
+      `(assert (not ${p.claim}))`,
       "(check-sat)",
     ];
-    if (argNames.length > 0) {
-      lines.push(`(get-value (${argNames.map((p) => p.smtName).join(" ")}))`);
+    if (p.argNames.length > 0) {
+      lines.push(`(get-value (${p.argNames.map((a) => a.smtName).join(" ")}))`);
     }
+    return { script: lines.join("\n") + "\n", deps };
+  };
+  const assembled = pending.map((p) => ({
+    pending: p,
+    ...assemble(p, p.defs, p.assumptions, p.posts),
+    plain: p.plain ? assemble(p, p.plain.defs, p.plain.assumptions, new Set()) : undefined,
+  }));
+
+  // Keep this file's goals and everything they rely on.
+  const keep = new Set<number>();
+  const visit = (i: number): void => {
+    if (keep.has(i)) return;
+    keep.add(i);
+    for (const d of assembled[i]!.deps) visit(d);
+  };
+  assembled.forEach((a, i) => {
+    if (a.pending.local) visit(i);
+  });
+  const kept = [...keep].sort((a, b) => a - b);
+  const newIndex = new Map(kept.map((old, i) => [old, i]));
+  const remap = (deps: ReadonlySet<number>): number[] =>
+    [...deps].map((d) => newIndex.get(d)!).sort((a, b) => a - b);
+
+  return kept.map((old) => {
+    const { pending: p, script, deps, plain } = assembled[old]!;
     return {
-      kind,
-      law: goal,
-      smtScript: lines.join("\n") + "\n",
-      paramSmtNames: argNames,
+      kind: p.kind,
+      law: p.goal,
+      smtScript: script,
+      paramSmtNames: p.argNames,
       recordsByCtor,
+      dependsOn: remap(deps),
+      ...(plain ? { plain: { smtScript: plain.script, dependsOn: remap(plain.deps) } } : {}),
     };
   });
 }

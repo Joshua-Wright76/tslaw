@@ -4,7 +4,7 @@
  * Produces well-typed `"use verified";` modules that exercise every construct the SMT
  * translation supports: bigint/boolean arithmetic and logic, records (including passing a
  * wider record where a narrower one is expected), `const` and destructuring, guard clauses,
- * `if`/`else`, ternaries, `implies`, and calls between functions.
+ * `if`/`else`, ternaries, `implies`, calls between functions, and recursion.
  *
  * `test/fuzz.test.ts` runs each generated function on concrete inputs in real JavaScript and
  * then requires the prover to agree with the result.
@@ -29,6 +29,8 @@ export interface GenFunction {
   readonly params: ReadonlyArray<Param>;
   readonly ret: TypeName;
   readonly source: string;
+  /** Recursive on its first parameter, which is worth testing with small values. */
+  readonly recursive?: boolean;
 }
 
 export type Rng = () => number;
@@ -209,11 +211,40 @@ function block(ctx: Ctx, ret: TypeName, depth: number, indent: string, fresh: { 
   return lines.join("\n");
 }
 
+/**
+ * A function that calls itself on `p0 - 1n`. Outside `1n..5n` it returns without recursing, so
+ * any argument is safe to run in JavaScript and other functions may call it freely.
+ */
+function recursiveFunction(rng: Rng, name: string, fns: ReadonlyArray<GenFunction>): GenFunction {
+  const params: Param[] = [{ name: "p0", type: "bigint" }];
+  const extra = Math.floor(rng() * 3);
+  for (let p = 1; p <= extra; p++) params.push({ name: `p${p}`, type: pick(rng, ALL_TYPES) });
+  const ret = pick(rng, ALL_TYPES);
+  const ctx: Ctx = { rng, env: [...params], fns };
+  const base = expr(ctx, ret, 2);
+  const recArgs = params.slice(1).map((p) => `, ${expr(ctx, p.type, 1)}`);
+  const rest = block({ rng, env: [...params, { name: "rec", type: ret }], fns }, ret, 2, "  ", { n: 0 });
+  const sig = params.map((p) => `${p.name}: ${p.type}`).join(", ");
+  const source = [
+    `export function ${name}(${sig}): ${ret} {`,
+    `  decreases(p0);`,
+    `  if (p0 <= 0n || p0 > 5n) return ${base};`,
+    `  const rec: ${ret} = ${name}(p0 - 1n${recArgs.join("")});`,
+    rest,
+    `}`,
+  ].join("\n");
+  return { name, params, ret, source, recursive: true };
+}
+
 export function generateFunctions(seed: number, count: number, prefix: string): GenFunction[] {
   const rng = makeRng(seed);
   const fns: GenFunction[] = [];
   for (let i = 0; i < count; i++) {
     const name = `${prefix}${i}`;
+    if (rng() < 0.25) {
+      fns.push(recursiveFunction(rng, name, fns));
+      continue;
+    }
     const params: Param[] = [];
     const arity = Math.floor(rng() * 4) + (rng() < 0.9 ? 1 : 0);
     for (let p = 0; p < arity; p++) params.push({ name: `p${p}`, type: pick(rng, ALL_TYPES) });

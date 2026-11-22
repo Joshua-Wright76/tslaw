@@ -31,10 +31,11 @@ export type LawStatus = "proved" | "disproved" | "unknown" | "error";
 export interface LawResult {
   readonly file: string;
   /**
-   * What was checked: a `law`, an `ensures` postcondition, or a call site that must satisfy
-   * the callee's `requires` (one result per call).
+   * What was checked: a `law`, an `ensures` postcondition, a call site that must satisfy the
+   * callee's `requires` (one result per call), or a recursive call that must make the
+   * `decreases` measure smaller (one result per call).
    */
-  readonly kind: "law" | "ensures" | "requires";
+  readonly kind: "law" | "ensures" | "requires" | "decreases";
   readonly name: string;
   readonly location: SourceLocation;
   /** The law's universally quantified parameters, in declaration order. */
