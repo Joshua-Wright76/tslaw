@@ -12,6 +12,16 @@
    - `unsat` → **PROVED** across all possible inputs.
    - `sat` → **DISPROVED**, with a concrete TypeScript counterexample.
 
+## Soundness Testing
+
+`PROVED` is only worth something if it can be trusted, so `test/soundness.test.ts` checks the prover against real JavaScript execution:
+
+- Every `PROVED` law is run on hundreds of random inputs and must hold on all of them.
+- Every `DISPROVED` counterexample is replayed and must actually violate the law.
+- `test/fixtures/soundness/` holds regression cases for past false-`PROVED` bugs. Laws named `FALSE: ...` must never be proved, and laws named `TRUE: ...` must be.
+
+If you find a law that vscript proves but that fails at runtime, please add it as a fixture there.
+
 ## Prerequisites
 
 - Node.js 20+

@@ -32,6 +32,8 @@ export interface LawResult {
   readonly file: string;
   readonly name: string;
   readonly location: SourceLocation;
+  /** The law's universally quantified parameters, in declaration order. */
+  readonly params: ReadonlyArray<{ readonly name: string; readonly type: VType }>;
   readonly status: LawStatus;
   readonly durationMs: number;
   readonly counterexample?: ReadonlyArray<CounterexampleEntry>;

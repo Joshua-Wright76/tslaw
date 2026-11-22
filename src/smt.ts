@@ -1,5 +1,11 @@
 import ts from "typescript";
-import { resolveVType, vTypeKey, type VerifiedFunction, type VerifiedLaw } from "./dialect.js";
+import {
+  resolveCallee,
+  resolveVType,
+  vTypeKey,
+  type VerifiedFunction,
+  type VerifiedLaw,
+} from "./dialect.js";
 import type { VType } from "./types.js";
 
 export interface RecordDef {
@@ -51,9 +57,9 @@ class RecordRegistry {
       smtName,
       ctorName,
       key,
-      fields: type.fields.map((f) => ({
+      fields: type.fields.map((f, i) => ({
         name: f.name,
-        smtAccessor: `${smtName}_${f.name}`,
+        smtAccessor: smtIdent(`${smtName}_${i}`, f.name),
         type: f.type,
       })),
     };
@@ -86,10 +92,23 @@ class RecordRegistry {
   }
 }
 
+/**
+ * Build an SMT-LIB2 symbol from a unique `prefix` plus a readable hint derived from a TS name.
+ *
+ * Uniqueness MUST come from the prefix (which callers build from a per-scope index), never from
+ * the sanitized name: sanitizing is lossy (`a$b` and `a_b` both become `a_b`), and Z3 silently
+ * accepts duplicate `define-fun` parameter names, binding the last one — which once let false
+ * laws be PROVED. The prefix also avoids collisions with SMT-LIB2 reserved words.
+ */
 function smtIdent(prefix: string, name: string): string {
-  // Prefix avoids collisions with SMT-LIB2 reserved words like `and`, `or`, `mod`, `to`, `from`, `assert`.
   const safe = name.replace(/[^A-Za-z0-9_]/g, "_");
   return `${prefix}_${safe}`;
+}
+
+/** Normalize a TS bigint literal (`1_000n`, `0x10n`, `0b101n`, `0o7n`) to a decimal SMT numeral. */
+function bigintLiteralToSmt(text: string): string {
+  const value = BigInt(text.replace(/_/g, "").replace(/n$/, ""));
+  return value < 0n ? `(- ${(-value).toString()})` : value.toString();
 }
 
 export function lowerModuleLaws(
@@ -108,6 +127,11 @@ export function lowerModuleLaws(
     for (const p of l.params) registry.register(p.type);
   }
 
+  // Assign every verified function a unique SMT name up front (functions arrive in
+  // dependency order, but a lookup table keeps the call lowering order-independent).
+  const fnSmtNames = new Map<ts.FunctionDeclaration, string>();
+  functions.forEach((fn, i) => fnSmtNames.set(fn.decl, smtIdent(`fn_${i}`, fn.name)));
+
   let freshId = 0;
   const nextVar = (hint: string): string => `v_${freshId++}_${hint.replace(/[^A-Za-z0-9_]/g, "")}`;
 
@@ -125,11 +149,7 @@ export function lowerModuleLaws(
       return lowerExpr(expr.expression, env);
     }
     if (ts.isBigIntLiteral(expr)) {
-      const raw = expr.text.replace(/_/g, "").replace(/n$/, "");
-      if (raw.startsWith("-")) {
-        return `(- ${raw.slice(1)})`;
-      }
-      return raw;
+      return bigintLiteralToSmt(expr.text);
     }
     if (expr.kind === ts.SyntaxKind.TrueKeyword) return "true";
     if (expr.kind === ts.SyntaxKind.FalseKeyword) return "false";
@@ -212,10 +232,20 @@ export function lowerModuleLaws(
     if (ts.isCallExpression(expr) && ts.isIdentifier(expr.expression)) {
       const fnName = expr.expression.text;
       const args = expr.arguments.map((a) => lowerExpr(a, env));
-      if (fnName === "implies") {
+      // Resolve the callee by symbol, never by name: a user function named `implies`, or two
+      // modules each defining a private `helper`, must not be confused with one another.
+      const callee = resolveCallee(checker, expr.expression);
+      if (callee.kind === "runtime" && callee.helper === "implies") {
+        if (args.length !== 2) throw new Error("`implies` requires exactly 2 arguments");
         return `(=> ${args[0]} ${args[1]})`;
       }
-      const target = smtIdent("fn", fnName);
+      if (callee.kind !== "function") {
+        throw new Error(`Cannot resolve callee \`${fnName}\` during SMT lowering`);
+      }
+      const target = fnSmtNames.get(callee.decl);
+      if (!target) {
+        throw new Error(`Callee \`${fnName}\` is not a known verified function`);
+      }
       return args.length > 0 ? `(${target} ${args.join(" ")})` : target;
     }
 
@@ -308,23 +338,23 @@ export function lowerModuleLaws(
   const fnDefs: string[] = [];
   for (const fn of functions) {
     const env = new Map<string, string>();
-    const paramsSmt = fn.params.map((p) => {
-      const smtName = smtIdent("p", p.name);
+    const paramsSmt = fn.params.map((p, i) => {
+      const smtName = smtIdent(`p_${i}`, p.name);
       env.set(p.name, smtName);
       return `(${smtName} ${registry.register(p.type)})`;
     });
     const retSort = registry.register(fn.returnType);
     const bodySmt = lowerBody(fn.body, env);
     fnDefs.push(
-      `(define-fun ${smtIdent("fn", fn.name)} (${paramsSmt.join(" ")}) ${retSort}\n  ${bodySmt})`,
+      `(define-fun ${fnSmtNames.get(fn.decl)!} (${paramsSmt.join(" ")}) ${retSort}\n  ${bodySmt})`,
     );
   }
 
   // Lower each law body first so every inline record type is registered before emitting datatype decls.
   const loweredLawBodies = laws.map((l) => {
     const env = new Map<string, string>();
-    const paramSmtNames = l.params.map((p) => {
-      const smtName = smtIdent("arg", p.name);
+    const paramSmtNames = l.params.map((p, i) => {
+      const smtName = smtIdent(`arg_${i}`, p.name);
       env.set(p.name, smtName);
       return { tsName: p.name, smtName, type: p.type };
     });

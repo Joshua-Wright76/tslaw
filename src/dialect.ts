@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import type { Diagnostic, SourceLocation, VType } from "./types.js";
 
@@ -8,11 +11,13 @@ export interface VerifiedParam {
 
 export interface VerifiedFunction {
   readonly name: string;
+  /** The declaration node — the function's identity (names are not unique across modules). */
+  readonly decl: ts.FunctionDeclaration;
   readonly params: ReadonlyArray<VerifiedParam>;
   readonly returnType: VType;
   readonly body: ts.Block | ts.Expression;
   readonly location: SourceLocation;
-  readonly calls: ReadonlySet<string>;
+  readonly calls: ReadonlySet<ts.FunctionDeclaration>;
 }
 
 export interface VerifiedLaw {
@@ -29,7 +34,105 @@ export interface DialectAnalysis {
   readonly laws: ReadonlyArray<VerifiedLaw>;
 }
 
-const RUNTIME_HELPERS = new Set(["law", "implies"]);
+// ---------------------------------------------------------------------------
+// Runtime identification
+//
+// `law` and `implies` get special SMT semantics, so they must be the *real* vscript runtime
+// helpers — not any function that happens to share the name. A user-defined
+// `implies = (a, b) => a && b` lowered as SMT `=>` would let false laws be PROVED.
+// ---------------------------------------------------------------------------
+
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const PACKAGE_ROOT = path.resolve(MODULE_DIR, "..");
+const RUNTIME_REL_PATHS = ["src/runtime.ts", "dist/runtime.d.ts", "dist/runtime.js"];
+
+function safeRealpath(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+const OWN_PACKAGE_NAME: string | undefined = (() => {
+  try {
+    const pkg: unknown = JSON.parse(fs.readFileSync(path.join(PACKAGE_ROOT, "package.json"), "utf8"));
+    if (typeof pkg === "object" && pkg !== null && "name" in pkg && typeof pkg.name === "string") {
+      return pkg.name;
+    }
+  } catch {
+    // Fall through: only bundled runtime paths will be recognized.
+  }
+  return undefined;
+})();
+
+const BUNDLED_RUNTIME_FILES = new Set(
+  RUNTIME_REL_PATHS.map((rel) => safeRealpath(path.join(PACKAGE_ROOT, rel))),
+);
+
+const runtimeFileCache = new Map<string, boolean>();
+
+/**
+ * True if `fileName` is the vscript runtime module: either this installation's own copy, or
+ * the runtime of an installed package with the same name (e.g. a project-local install checked
+ * by a globally installed CLI).
+ */
+export function isVscriptRuntimeFile(fileName: string): boolean {
+  const cached = runtimeFileCache.get(fileName);
+  if (cached !== undefined) return cached;
+
+  const real = safeRealpath(fileName);
+  let result = BUNDLED_RUNTIME_FILES.has(real);
+  if (!result && OWN_PACKAGE_NAME) {
+    let dir = path.dirname(real);
+    while (true) {
+      const pkgPath = path.join(dir, "package.json");
+      if (fs.existsSync(pkgPath)) {
+        try {
+          const pkg: unknown = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+          const name =
+            typeof pkg === "object" && pkg !== null && "name" in pkg ? pkg.name : undefined;
+          const rel = path.relative(dir, real).split(path.sep).join("/");
+          result = name === OWN_PACKAGE_NAME && RUNTIME_REL_PATHS.includes(rel);
+        } catch {
+          result = false;
+        }
+        break;
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+  runtimeFileCache.set(fileName, result);
+  return result;
+}
+
+export type CalleeRef =
+  | { readonly kind: "runtime"; readonly helper: "law" | "implies" }
+  | { readonly kind: "function"; readonly decl: ts.FunctionDeclaration }
+  | { readonly kind: "other" };
+
+/**
+ * Resolve what an identifier in call position (or an import specifier) actually refers to,
+ * following import aliases through the type checker. Functions are identified by their
+ * declaration node, never by name.
+ */
+export function resolveCallee(checker: ts.TypeChecker, ident: ts.Identifier): CalleeRef {
+  let sym = checker.getSymbolAtLocation(ident);
+  if (!sym) return { kind: "other" };
+  if (sym.flags & ts.SymbolFlags.Alias) sym = checker.getAliasedSymbol(sym);
+  const decl = sym.valueDeclaration ?? sym.declarations?.[0];
+  if (!decl || !ts.isFunctionDeclaration(decl) || !decl.name) return { kind: "other" };
+  const name = decl.name.text;
+  if (
+    (name === "law" || name === "implies") &&
+    isVscriptRuntimeFile(decl.getSourceFile().fileName)
+  ) {
+    return { kind: "runtime", helper: name };
+  }
+  return { kind: "function", decl };
+}
 
 export function getLocation(sf: ts.SourceFile, node: ts.Node): SourceLocation {
   const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
@@ -186,7 +289,6 @@ export function analyzeDialect(
   const hasVerifiedDirective = hasUseVerifiedDirective(sf);
   const diagnostics: Diagnostic[] = [];
   const functions: VerifiedFunction[] = [];
-  const importedFunctions = new Map<string, VerifiedFunction>();
   const laws: VerifiedLaw[] = [];
 
   // Pre-seed cache to guard against cyclic imports.
@@ -207,16 +309,9 @@ export function analyzeDialect(
     });
   };
 
-  // First pass: collect declared verified function names so calls can be validated.
-  const declaredFnNames = new Set<string>();
-  for (const stmt of sf.statements) {
-    if (ts.isFunctionDeclaration(stmt) && stmt.name) {
-      declaredFnNames.add(stmt.name.text);
-    }
-  }
-
-  // Track runtime imports (`law`, `implies`) and cross-file `"use verified";` imports.
-  const importedRuntimeNames = new Set<string>();
+  // Track cross-file `"use verified";` imports. Runtime helpers (`law`, `implies`) and
+  // verified functions are identified by resolving symbols, never by name.
+  const importedFunctions = new Map<ts.FunctionDeclaration, VerifiedFunction>();
   const analyzedDeps = new Set<string>();
   for (const stmt of sf.statements) {
     if (!ts.isImportDeclaration(stmt) || !stmt.importClause) continue;
@@ -232,8 +327,8 @@ export function analyzeDialect(
     for (const elem of stmt.importClause.namedBindings.elements) {
       if (elem.isTypeOnly) continue;
       const orig = elem.propertyName?.text ?? elem.name.text;
-      if (RUNTIME_HELPERS.has(orig)) {
-        importedRuntimeNames.add(elem.name.text);
+      const callee = resolveCallee(checker, elem.name);
+      if (callee.kind === "runtime") {
         continue;
       }
       const sym = checker.getSymbolAtLocation(elem.name);
@@ -244,8 +339,16 @@ export function analyzeDialect(
       if (decl && (ts.isTypeAliasDeclaration(decl) || ts.isInterfaceDeclaration(decl))) {
         continue;
       }
-      if (decl && ts.isFunctionDeclaration(decl)) {
-        const depSf = decl.getSourceFile();
+      if (callee.kind === "function") {
+        const depSf = callee.decl.getSourceFile();
+        if ((orig === "law" || orig === "implies") && !hasUseVerifiedDirective(depSf)) {
+          addError(
+            "VS001",
+            `\`${orig}\` must be imported from the vscript runtime (found a different \`${orig}\` in ${depSf.fileName})`,
+            elem,
+          );
+          continue;
+        }
         if (!hasUseVerifiedDirective(depSf)) {
           addError(
             "VS001",
@@ -259,14 +362,9 @@ export function analyzeDialect(
           const depAnalysis = analyzeDialect(depSf, checker, visited);
           diagnostics.push(...depAnalysis.diagnostics);
           for (const depFn of depAnalysis.functions) {
-            importedFunctions.set(depFn.name, depFn);
+            importedFunctions.set(depFn.decl, depFn);
           }
         }
-        if (elem.propertyName && elem.propertyName.text !== elem.name.text) {
-          addError("VS001", "Aliased function imports (`as`) are not yet supported in verified modules", elem);
-          continue;
-        }
-        declaredFnNames.add(elem.name.text);
         continue;
       }
       addError(
@@ -280,7 +378,7 @@ export function analyzeDialect(
   const checkBody = (
     body: ts.Block | ts.Expression,
     localNames: Set<string>,
-    callsOut: Set<string>,
+    callsOut: Set<ts.FunctionDeclaration>,
   ): void => {
     const checkExpr = (expr: ts.Expression, scope: Set<string>): void => {
       if (ts.isParenthesizedExpression(expr)) {
@@ -424,14 +522,21 @@ export function analyzeDialect(
           return;
         }
         const fnName = expr.expression.text;
-        if (fnName === "implies" && importedRuntimeNames.has(fnName)) {
+        const callee = resolveCallee(checker, expr.expression);
+        if (callee.kind === "runtime" && callee.helper === "implies") {
           if (expr.arguments.length !== 2) {
             addError("VS018", "`implies` requires exactly 2 arguments", expr);
           }
           for (const arg of expr.arguments) checkExpr(arg, scope);
           return;
         }
-        if (!declaredFnNames.has(fnName)) {
+        const calleeSf = callee.kind === "function" ? callee.decl.getSourceFile() : undefined;
+        const isVerifiedCallee =
+          callee.kind === "function" &&
+          calleeSf !== undefined &&
+          ts.isSourceFile(callee.decl.parent) &&
+          (calleeSf === sf || analyzedDeps.has(calleeSf.fileName));
+        if (!isVerifiedCallee) {
           addError(
             "VS018",
             `Call to unverified function \`${fnName}\` is forbidden inside verified modules`,
@@ -439,7 +544,7 @@ export function analyzeDialect(
           );
           return;
         }
-        callsOut.add(fnName);
+        callsOut.add(callee.decl);
         for (const arg of expr.arguments) checkExpr(arg, scope);
         return;
       }
@@ -655,10 +760,11 @@ export function analyzeDialect(
         continue;
       }
       const params = checkParams(stmt.parameters);
-      const calls = new Set<string>();
+      const calls = new Set<ts.FunctionDeclaration>();
       checkBody(stmt.body, new Set(params.map((p) => p.name)), calls);
       functions.push({
         name: stmt.name.text,
+        decl: stmt,
         params,
         returnType: retResolved.type,
         body: stmt.body,
@@ -672,8 +778,10 @@ export function analyzeDialect(
       ts.isExpressionStatement(stmt) &&
       ts.isCallExpression(stmt.expression) &&
       ts.isIdentifier(stmt.expression.expression) &&
-      stmt.expression.expression.text === "law" &&
-      importedRuntimeNames.has("law")
+      (() => {
+        const callee = resolveCallee(checker, stmt.expression.expression);
+        return callee.kind === "runtime" && callee.helper === "law";
+      })()
     ) {
       const args = stmt.expression.arguments;
       if (args.length !== 2) {
@@ -694,7 +802,7 @@ export function analyzeDialect(
         continue;
       }
       const params = checkParams(fnArg.parameters);
-      const calls = new Set<string>();
+      const calls = new Set<ts.FunctionDeclaration>();
       checkBody(fnArg.body, new Set(params.map((p) => p.name)), calls);
       laws.push({
         name: nameArg.text,
@@ -714,18 +822,19 @@ export function analyzeDialect(
 
   // Third pass: merge imported verified functions and topologically sort call graph.
   const allFunctions: VerifiedFunction[] = [...importedFunctions.values(), ...functions];
-  const fnMap = new Map(allFunctions.map((f) => [f.name, f]));
-  const color = new Map<string, 0 | 1 | 2>(); // 0=unvisited, 1=visiting, 2=done
+  const fnMap = new Map(allFunctions.map((f) => [f.decl, f]));
+  const color = new Map<ts.FunctionDeclaration, 0 | 1 | 2>(); // 0=unvisited, 1=visiting, 2=done
   const ordered: VerifiedFunction[] = [];
 
-  const dfs = (name: string, stack: string[]): void => {
-    color.set(name, 1);
-    const fn = fnMap.get(name);
+  const fnName = (d: ts.FunctionDeclaration): string => d.name?.text ?? "<anonymous>";
+  const dfs = (decl: ts.FunctionDeclaration, stack: ts.FunctionDeclaration[]): void => {
+    color.set(decl, 1);
+    const fn = fnMap.get(decl);
     if (!fn) return;
     for (const callee of fn.calls) {
       const c = color.get(callee) ?? 0;
       if (c === 1) {
-        const cycle = [...stack.slice(stack.indexOf(callee)), callee].join(" -> ");
+        const cycle = [...stack.slice(stack.indexOf(callee)), callee].map(fnName).join(" -> ");
         diagnostics.push({
           stage: "dialect",
           code: "VS032",
@@ -736,13 +845,13 @@ export function analyzeDialect(
         dfs(callee, [...stack, callee]);
       }
     }
-    color.set(name, 2);
+    color.set(decl, 2);
     ordered.push(fn);
   };
 
   for (const fn of allFunctions) {
-    if ((color.get(fn.name) ?? 0) === 0) {
-      dfs(fn.name, [fn.name]);
+    if ((color.get(fn.decl) ?? 0) === 0) {
+      dfs(fn.decl, [fn.decl]);
     }
   }
 

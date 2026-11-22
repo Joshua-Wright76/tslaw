@@ -29,6 +29,7 @@ Implemented:
   3. SMT-LIB2 lowering (`src/smt.ts`) and Z3 solver runner (`src/z3.ts`) supporting `bigint` (`Int`), `boolean` (`Bool`), immutable `readonly` record types (`declare-datatypes`), `const` bindings, `if`/`else` with early returns, ternaries, helper function calls, and `implies(a, b)`.
 - Runtime shim (`src/runtime.ts`) exporting zero-cost `law(name, fn)` and `implies(p, q)` so verified files remain valid standard TypeScript.
 - CLI (`src/cli.ts`, `vscript check <files...> [--emit-smt] [--json] [--timeout <ms>]`) reporting `PROVED`, `DISPROVED` (with concrete counterexamples), `UNKNOWN`, `DIALECT ERROR`, and `TYPE ERROR`.
+- Soundness regression suite (`test/soundness.test.ts`, fixtures in `test/fixtures/soundness/`): every PROVED law is run on random inputs in JS, every counterexample is replayed in JS, and laws named `FALSE: ...` / `TRUE: ...` must be disproved / proved. Add a fixture for any future false-PROVED bug.
 - Examples (`examples/tokens.law.ts`, `examples/bank.law.ts`, `examples/buggy.law.ts`, `examples/unsound.law.ts`) and Vitest integration suite (`test/vscript.test.ts`).
 
 ## Important Decisions
@@ -37,14 +38,21 @@ Implemented:
 - Uses native `z3` binary via SMT-LIB2 stdin/stdout (fast, zero WASM startup overhead); solver binary path is configurable via `VSCRIPT_Z3` or `--z3`.
 - Division/modulo (`/` and `%`) are intentionally not yet enabled in v0.1 because JS truncating division toward zero differs from SMT-LIB2 Euclidean `div`/`mod` on negative operands; planned with explicit trunc-div encoding in a future iteration.
 
+- Soundness invariants for the SMT encoding (each once caused false PROVED verdicts):
+  - Functions are identified by their `ts.FunctionDeclaration` node (resolved through the type checker, following import aliases), never by name. Each gets a unique SMT name `fn_<index>_<name>`. Aliased imports (`import { f as g }`) work as a result.
+  - `law` and `implies` get special meaning only when they resolve to the real vscript runtime file (`isVscriptRuntimeFile` in `src/dialect.ts`: this install's `src/runtime.ts` / `dist/runtime.*`, or the same paths in an installed package whose `package.json` name matches ours). Any other function with those names is a normal function.
+  - SMT identifiers get uniqueness from an index prefix (`p_<i>_`, `arg_<i>_`, `Rec_<n>_<i>_`), never from the sanitized TS name, because sanitizing is lossy (`a$b` and `a_b` collide) and Z3 silently accepts duplicate `define-fun` parameter names.
+
 ## Open Questions / Known Gaps
 - Division/modulo with exact JS truncation-toward-zero semantics is not yet lowered.
 - Immutable fixed-length tuples, unions/discriminated enums, and bounded arrays are planned next steps.
 - Boundary wrapper generation (auto-emitting runtime validation guards for calls from unverified TS into `"use verified";` modules) is not yet implemented.
+- Open-source readiness (planned, identified 2026-11-21): npm name `vscript` is taken; no LICENSE; `package.json` lacks `files`/`prepublishOnly`/`engines`/`license`/`repository`; no CI; README lacks a "what PROVED means" section and an error-code reference.
+- Smaller known bugs: passing a record with extra fields to a function expecting fewer fields gives a raw Z3 sort error; `@ts-ignore`/`@ts-expect-error`/`@ts-nocheck` are not banned in verified files; Stage 1 typechecks only the named files, not imported verified deps; raw Z3 output is printed after a Z3 error.
 - Optional WASM fallback (`z3-solver`) for machines without native `z3` installed is not yet wired.
 
 ## Notes For The Next Agent
-- Run `npm run build && npm test` to validate changes.
+- Run `npm run build && npm test` to validate changes. Tests take ~30s (each `verifyFiles` builds a TS program); `vitest.config.ts` sets a 30s timeout and excludes `.worktrees/`.
 - Try the CLI on examples:
   - `node dist/cli.js check examples/tokens.law.ts examples/bank.law.ts`
   - `node dist/cli.js check examples/buggy.law.ts`

@@ -163,6 +163,7 @@ export async function verifyFiles(
           file: absPath,
           name: lowered.law.name,
           location: lowered.law.location,
+          params: lowered.law.params.map((p) => ({ name: p.name, type: p.type })),
           status: z3Res.status,
           durationMs: z3Res.durationMs,
           ...(z3Res.counterexample ? { counterexample: z3Res.counterexample } : {}),
