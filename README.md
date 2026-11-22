@@ -120,6 +120,10 @@ Each file goes through three stages. A failure at any stage stops that file.
 
 To keep that last point honest, the test suite cross-checks verdicts against real execution: every proved law is run on random inputs, every counterexample is replayed, and `test/fixtures/soundness/` holds a regression case for each known way tslaw was once tricked into proving something false.
 
+The translation itself is also fuzzed: `test/fuzz.test.ts` generates random programs in the verified subset, runs them in JavaScript, and requires the prover to agree with every result (`TSLAW_FUZZ_RUNS=300 npm test -- test/fuzz.test.ts` for a longer run).
+
+[`docs/SEMANTICS.md`](docs/SEMANTICS.md) defines precisely what the subset means, how it is translated for Z3, and what a proof depends on.
+
 **If tslaw proves a law that fails when you run it, that is the most serious kind of bug. Please [open an issue](https://github.com/Joshua-Wright76/tslaw/issues) with the smallest file that reproduces it.**
 
 ## Error codes

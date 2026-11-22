@@ -182,6 +182,24 @@ export function lowerModuleLaws(
       const f = lowerExpr(expr.whenFalse, env, target);
       return `(ite ${c} ${t} ${f})`;
     }
+    if (expected?.kind === "record" && ts.isObjectLiteralExpression(expr)) {
+      // Build the expected record directly from the literal's properties. The literal's own
+      // inferred type can be something no single datatype models (for example a field whose
+      // value is a ternary between two record shapes), but each property has an expected type.
+      const recDef = registry.getRecord(expected);
+      const args = recDef.fields.map((f) => {
+        for (const prop of expr.properties) {
+          if (ts.isPropertyAssignment(prop) && ts.isIdentifier(prop.name) && prop.name.text === f.name) {
+            return lowerExpr(prop.initializer, env, f.type);
+          }
+          if (ts.isShorthandPropertyAssignment(prop) && prop.name.text === f.name) {
+            return lowerExpr(prop.name, env, f.type);
+          }
+        }
+        throw new Error(`Missing field \`${f.name}\` in object literal`);
+      });
+      return `(${recDef.ctorName} ${args.join(" ")})`;
+    }
     const smt = lowerExprRaw(expr, env);
     if (!expected || expected.kind !== "record") return smt;
     return project(smt, resolveExprVType(expr), expected);

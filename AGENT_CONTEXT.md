@@ -18,6 +18,7 @@ Open a new worktree in this folder, make the changes on a feature branch inside 
 ## Canonical References
 - Overall project state: this file
 - Architecture and CLI usage: `README.md`
+- Formal definition of the subset, its translation, and the (informal, not machine-checked) soundness argument: `docs/SEMANTICS.md`. Any change to `src/smt.ts` or to what `src/dialect.ts` accepts must be reflected there.
 - Animated explainer: `docs/explainer.html` (self-contained, no dependencies; scenes are `<section class="scene">` blocks timed with `data-dur` / `data-at` / `data-lit`). Update it when the pipeline or product name changes.
 
 ## Current State
@@ -55,6 +56,10 @@ Implemented:
 - `Readonly<T>` records are recognized through TypeScript's internal symbol `checkFlags` (Readonly = `1 << 3`) in `resolveVType`; re-check this on TypeScript major upgrades (covered by `test/fixtures/soundness/readonly-utility.law.ts`).
 - Files without the directive are skipped before type-checking. The checker uses `module: ESNext` + `moduleResolution: Bundler` (accepts `./mod.js` and extensionless imports); the user's own tsconfig is not read.
 - The CLI sets `process.exitCode` rather than calling `process.exit()` after output, so large piped output is not truncated.
+
+- Translator fuzzing: `test/fuzz/generate.ts` generates random well-typed verified modules; `test/fuzz.test.ts` runs each function on concrete inputs in JS and requires `f(v) === result` to be PROVED and a perturbed result DISPROVED. Default 10 modules per test run; `TSLAW_FUZZ_SEED` / `TSLAW_FUZZ_RUNS` scale it (300 runs, ~10,800 laws, takes ~80s). Extend the generator whenever the subset grows. Failing programs are left in `test/.generated/` (gitignored).
+- Unions whose members all have the same model (`1n | 2n`, two record shapes with identical fields) resolve to that model. Object literals in a position with an expected record type are lowered directly against that type, not via the literal's own inferred type.
+- Roadmap toward a defensible "formal verification" claim (user wants all seven, 2026-11-21): (7) translator fuzzing - done; (1) written semantics - done; (2) independent check of Z3's answers (second solver / proof certificates); (4) function contracts `requires`/`ensures`; (5) runtime guards at the verified boundary; (3) loops/recursion with invariants and termination measures, arrays; (6) mechanised proof of the translation for a core calculus in Lean.
 
 ## Open Questions / Known Gaps
 - `package.json` `repository` assumes `github.com/Joshua-Wright76/tslaw`; that repo does not exist yet, and CI has never run on GitHub.

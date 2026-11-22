@@ -225,12 +225,16 @@ export function resolveVType(
     };
   }
   if (type.isUnion()) {
-    // Boolean is represented as union of true | false in TS
+    // A union is fine when every member has the same model: `true | false` is `boolean`,
+    // `1n | 2n` (the type of `c ? 1n : 2n`) is `bigint`, and two record shapes with identical
+    // fields are one record. Anything else would need a tagged representation.
+    const members = type.types.map((t) => resolveVType(checker, t, new Set(seen), declared));
+    const first = members[0];
     if (
-      type.types.length === 2 &&
-      type.types.every((t) => (t.getFlags() & ts.TypeFlags.BooleanLiteral) !== 0)
+      first?.ok &&
+      members.every((m) => m.ok && vTypeKey(m.type) === vTypeKey(first.type))
     ) {
-      return { ok: true, type: { kind: "boolean" } };
+      return first;
     }
     return {
       ok: false,
@@ -652,7 +656,12 @@ export function analyzeDialect(
               continue;
             }
             checkExpr(decl.initializer, scope);
-            const initType = resolveVType(checker, checker.getTypeAtLocation(decl.initializer));
+            // For `const x: T = init` the binding has type T, which may be narrower than (or a
+            // simplification of) the initializer's own type.
+            const initType = resolveVType(
+              checker,
+              checker.getTypeAtLocation(ts.isIdentifier(decl.name) ? decl.name : decl.initializer),
+            );
             if (!initType.ok) {
               addError("LAW023", `Invalid local type: ${initType.reason}`, decl);
             }
