@@ -1,4 +1,4 @@
-export { law, implies } from "./runtime.js";
+export { law, implies, requires, ensures } from "./runtime.js";
 export { verifyFiles } from "./verify.js";
 export { analyzeDialect, hasUseVerifiedDirective, resolveVType } from "./dialect.js";
 export { lowerModuleLaws } from "./smt.js";

@@ -18,6 +18,21 @@ export interface VerifiedFunction {
   readonly body: ts.Block | ts.Expression;
   readonly location: SourceLocation;
   readonly calls: ReadonlySet<ts.FunctionDeclaration>;
+  /**
+   * Preconditions: the arguments of the leading `requires(...)` statements, in order. They
+   * are the first `requires.length` statements of `body`, which evaluation skips.
+   */
+  readonly requires: ReadonlyArray<ts.Expression>;
+}
+
+/** `ensures(fn, (...params, result) => post)`. */
+export interface VerifiedEnsures {
+  readonly fn: ts.FunctionDeclaration;
+  readonly fnName: string;
+  /** The callback's parameters: the function's parameters followed by its result. */
+  readonly params: ReadonlyArray<VerifiedParam>;
+  readonly body: ts.Block | ts.Expression;
+  readonly location: SourceLocation;
 }
 
 export interface VerifiedLaw {
@@ -32,6 +47,7 @@ export interface DialectAnalysis {
   readonly diagnostics: Diagnostic[];
   readonly functions: ReadonlyArray<VerifiedFunction>;
   readonly laws: ReadonlyArray<VerifiedLaw>;
+  readonly ensures: ReadonlyArray<VerifiedEnsures>;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,7 +125,7 @@ export function isTslawRuntimeFile(fileName: string): boolean {
 }
 
 export type CalleeRef =
-  | { readonly kind: "runtime"; readonly helper: "law" | "implies" }
+  | { readonly kind: "runtime"; readonly helper: "law" | "implies" | "requires" | "ensures" }
   | { readonly kind: "function"; readonly decl: ts.FunctionDeclaration }
   | { readonly kind: "other" };
 
@@ -126,7 +142,7 @@ export function resolveCallee(checker: ts.TypeChecker, ident: ts.Identifier): Ca
   if (!decl || !ts.isFunctionDeclaration(decl) || !decl.name) return { kind: "other" };
   const name = decl.name.text;
   if (
-    (name === "law" || name === "implies") &&
+    (name === "law" || name === "implies" || name === "requires" || name === "ensures") &&
     isTslawRuntimeFile(decl.getSourceFile().fileName)
   ) {
     return { kind: "runtime", helper: name };
@@ -321,6 +337,7 @@ export function analyzeDialect(
   const diagnostics: Diagnostic[] = [];
   const functions: VerifiedFunction[] = [];
   const laws: VerifiedLaw[] = [];
+  const ensuresList: VerifiedEnsures[] = [];
 
   // Pre-seed cache to guard against cyclic imports.
   const stub: DialectAnalysis = {
@@ -328,6 +345,7 @@ export function analyzeDialect(
     diagnostics,
     functions,
     laws,
+    ensures: ensuresList,
   };
   visited.set(sf.fileName, stub);
 
@@ -432,7 +450,21 @@ export function analyzeDialect(
     body: ts.Block | ts.Expression,
     localNames: Set<string>,
     callsOut: Set<ts.FunctionDeclaration>,
+    /** When given, leading `requires(...)` statements are allowed and collected here. */
+    requiresOut?: ts.Expression[],
   ): void => {
+    const asRequires = (stmt: ts.Statement): ts.CallExpression | undefined => {
+      if (
+        ts.isExpressionStatement(stmt) &&
+        ts.isCallExpression(stmt.expression) &&
+        ts.isIdentifier(stmt.expression.expression)
+      ) {
+        const callee = resolveCallee(checker, stmt.expression.expression);
+        if (callee.kind === "runtime" && callee.helper === "requires") return stmt.expression;
+      }
+      return undefined;
+    };
+
     // JavaScript lets any value act as a condition (`0n` is falsy). The SMT encoding has no
     // truthiness, so conditions and logical operands must be real booleans.
     const requireBoolean = (expr: ts.Expression): void => {
@@ -635,11 +667,33 @@ export function analyzeDialect(
       );
     };
 
-    const checkBlock = (block: ts.Block, outerScope: Set<string>): boolean => {
+    const checkBlock = (block: ts.Block, outerScope: Set<string>, topLevel = false): boolean => {
       const scope = new Set(outerScope);
       let terminated = false;
+      let inRequiresPrefix = topLevel && requiresOut !== undefined;
 
       for (const stmt of block.statements) {
+        const req = asRequires(stmt);
+        if (req) {
+          if (!inRequiresPrefix) {
+            addError(
+              "LAW035",
+              "`requires(...)` must be the first statement(s) of a verified function body",
+              stmt,
+            );
+            continue;
+          }
+          const cond = req.arguments[0];
+          if (req.arguments.length !== 1 || !cond) {
+            addError("LAW035", "`requires` takes exactly one boolean condition", stmt);
+            continue;
+          }
+          requireBoolean(cond);
+          checkExpr(cond, scope);
+          requiresOut?.push(cond);
+          continue;
+        }
+        inRequiresPrefix = false;
         if (terminated) {
           addError("LAW021", "Unreachable statement after `return`", stmt);
           break;
@@ -760,7 +814,7 @@ export function analyzeDialect(
     };
 
     if (ts.isBlock(body)) {
-      const returns = checkBlock(body, localNames);
+      const returns = checkBlock(body, localNames, true);
       if (!returns) {
         addError("LAW029", "Verified function/law block must return on every code path", body);
       }
@@ -776,6 +830,8 @@ export function analyzeDialect(
 
   const checkParams = (
     params: ts.NodeArray<ts.ParameterDeclaration>,
+    /** Allow parameters without annotations when TypeScript infers them from context. */
+    allowInferred = false,
   ): VerifiedParam[] => {
     const out: VerifiedParam[] = [];
     for (const p of params) {
@@ -787,7 +843,7 @@ export function analyzeDialect(
         addError("LAW005", "Destructured parameters are not supported; name parameters directly", p);
         continue;
       }
-      if (!p.type) {
+      if (!p.type && !allowInferred) {
         addError("LAW005", `Parameter \`${p.name.text}\` must have an explicit type annotation`, p);
         continue;
       }
@@ -844,8 +900,10 @@ export function analyzeDialect(
       }
       const params = checkParams(stmt.parameters);
       const calls = new Set<ts.FunctionDeclaration>();
-      checkBody(stmt.body, paramScope(stmt.parameters), calls);
+      const requires: ts.Expression[] = [];
+      checkBody(stmt.body, paramScope(stmt.parameters), calls, requires);
       functions.push({
+        requires,
         name: stmt.name.text,
         decl: stmt,
         params,
@@ -891,6 +949,60 @@ export function analyzeDialect(
         name: nameArg.text,
         params,
         body: fnArg.body,
+        location: getLocation(sf, stmt),
+      });
+      continue;
+    }
+
+    if (
+      ts.isExpressionStatement(stmt) &&
+      ts.isCallExpression(stmt.expression) &&
+      ts.isIdentifier(stmt.expression.expression) &&
+      (() => {
+        const callee = resolveCallee(checker, stmt.expression.expression);
+        return callee.kind === "runtime" && callee.helper === "ensures";
+      })()
+    ) {
+      const [fnArg, postArg] = stmt.expression.arguments;
+      if (stmt.expression.arguments.length !== 2 || !fnArg || !postArg) {
+        addError("LAW036", "`ensures(fn, postcondition)` requires exactly 2 arguments", stmt);
+        continue;
+      }
+      const target = ts.isIdentifier(fnArg) ? resolveCallee(checker, fnArg) : undefined;
+      const targetSf = target?.kind === "function" ? target.decl.getSourceFile() : undefined;
+      if (
+        target?.kind !== "function" ||
+        !target.decl.name ||
+        !ts.isSourceFile(target.decl.parent) ||
+        !(targetSf === sf || (targetSf !== undefined && analyzedDeps.has(targetSf.fileName)))
+      ) {
+        addError("LAW036", "First argument to `ensures` must name a verified function", fnArg);
+        continue;
+      }
+      if (!ts.isArrowFunction(postArg) && !ts.isFunctionExpression(postArg)) {
+        addError("LAW036", "Second argument to `ensures` must be an arrow or function expression", postArg);
+        continue;
+      }
+      if (postArg.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)) {
+        addError("LAW036", "`ensures` postconditions cannot be async", postArg);
+        continue;
+      }
+      if (postArg.parameters.length !== target.decl.parameters.length + 1) {
+        addError(
+          "LAW036",
+          `Postcondition must take the function's ${target.decl.parameters.length} parameter(s) followed by its result`,
+          postArg,
+        );
+        continue;
+      }
+      const params = checkParams(postArg.parameters, true);
+      const calls = new Set<ts.FunctionDeclaration>();
+      checkBody(postArg.body, paramScope(postArg.parameters), calls);
+      ensuresList.push({
+        fn: target.decl,
+        fnName: target.decl.name.text,
+        params,
+        body: postArg.body,
         location: getLocation(sf, stmt),
       });
       continue;
@@ -943,6 +1055,7 @@ export function analyzeDialect(
     diagnostics,
     functions: ordered,
     laws,
+    ensures: ensuresList,
   };
   visited.set(sf.fileName, result);
   return result;

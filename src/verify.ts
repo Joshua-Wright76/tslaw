@@ -156,7 +156,7 @@ export async function verifyFiles(
     // Stage 3: SMT-LIB2 lowering & Z3 proof checking
     let loweredLaws;
     try {
-      loweredLaws = lowerModuleLaws(checker, analysis.functions, analysis.laws);
+      loweredLaws = lowerModuleLaws(checker, analysis.functions, analysis.laws, analysis.ensures, sf);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       errors++;
@@ -217,6 +217,7 @@ export async function verifyFiles(
 
         lawResults[idx] = {
           file: absPath,
+          kind: lowered.kind,
           name: lowered.law.name,
           location: lowered.law.location,
           params: lowered.law.params.map((p) => ({ name: p.name, type: p.type })),

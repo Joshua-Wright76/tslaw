@@ -101,6 +101,8 @@ async function verifyAndReplay(file: string): Promise<ReadonlyArray<LawResult>> 
   expect(result.diagnostics, `unexpected diagnostics in ${file}`).toEqual([]);
   const predicates = await loadPredicates(file);
   for (const law of result.laws) {
+    // Only `law(...)` predicates are registered at runtime; contracts are covered elsewhere.
+    if (law.kind !== "law") continue;
     if (law.name.startsWith("FALSE:")) {
       expect(law.status, `"${law.name}" is false at runtime but was ${law.status}`).toBe("disproved");
     } else if (law.name.startsWith("TRUE:")) {

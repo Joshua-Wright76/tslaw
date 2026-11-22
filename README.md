@@ -83,6 +83,25 @@ Each law gets one of these verdicts:
 | `UNKNOWN` | Z3 gave up or timed out. Nothing is known either way. |
 | `ERROR` | Z3 could not run, or rejected the generated query. |
 
+### Contracts
+
+A function can state what it needs from its callers and what it guarantees in return:
+
+```ts
+import { requires, ensures } from "tslaw/runtime";
+
+export function withdraw(acc: Account, amount: bigint): Account {
+  requires(amount > 0n && amount <= acc.balance);
+  return { balance: acc.balance - amount, frozen: acc.frozen };
+}
+
+ensures(withdraw, (acc, amount, result) => result.balance === acc.balance - amount);
+```
+
+- `requires(cond)` must come first in the function body. tslaw proves, for **every call from verified code**, that the condition holds at that call, taking into account the `if`, ternary, `&&`, `||` and `implies` conditions around it. A call that can violate it is reported as `DISPROVED "requires of withdraw at line N"` with the arguments that break it.
+- `ensures(fn, (...args, result) => cond)` is proved for all arguments that satisfy the function's `requires`.
+- Both do nothing at runtime, like `law`. They do not stop unverified code from calling the function with bad arguments.
+
 There is also a programmatic API: `import { verifyFiles } from "tslaw"`.
 
 ## How it works
@@ -105,12 +124,12 @@ Each file goes through three stages. A failure at any stage stops that file.
 
 **Code**
 
-- Top level: `type`/`interface` declarations, function declarations, and `law(name, predicate)` calls.
+- Top level: `type`/`interface` declarations, function declarations, and `law(name, predicate)` / `ensures(fn, postcondition)` calls.
 - Functions need explicit parameter and return types.
 - `const` bindings (including object destructuring), `if`/`else` where every path returns, ternaries.
 - Operators: `+ - *`, comparisons, `===`/`!==` on `bigint` and `boolean`, `&& || !`.
 - Calls to other verified functions, and `implies(p, q)`.
-- Imports: `law`/`implies` from `tslaw/runtime`, types from anywhere, and functions from other `"use verified";` modules.
+- Imports: `law`, `implies`, `requires`, `ensures` from `tslaw/runtime`, types from anywhere, and functions from other `"use verified";` modules.
 
 **Not allowed**
 
@@ -176,6 +195,8 @@ Codes starting with `TS` come from the TypeScript compiler. The rest are tslaw's
 | `LAW032` | Recursion (direct or through other functions). |
 | `LAW033` | `@ts-ignore`, `@ts-expect-error`, or `@ts-nocheck` comment. |
 | `LAW034` | A non-`boolean` (such as a `bigint`) used as a condition or as an operand of `!`, `&&`, `||`. |
+| `LAW035` | `requires(...)` that is not at the start of a function body, or with the wrong arguments. |
+| `LAW036` | Malformed `ensures(...)`: needs a verified function and a callback taking its parameters plus the result. |
 | `LAW090` | Internal: translation to SMT failed. Please report it. |
 
 ## Development

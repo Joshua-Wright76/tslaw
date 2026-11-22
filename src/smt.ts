@@ -1,12 +1,15 @@
 import ts from "typescript";
 import {
+  getLocation,
   resolveCallee,
   resolveVType,
   vTypeKey,
+  type VerifiedEnsures,
   type VerifiedFunction,
   type VerifiedLaw,
+  type VerifiedParam,
 } from "./dialect.js";
-import type { VType } from "./types.js";
+import type { SourceLocation, VType } from "./types.js";
 
 export interface RecordDef {
   readonly smtName: string;
@@ -19,8 +22,18 @@ export interface RecordDef {
   }>;
 }
 
+/** What a query proves: a user law, a postcondition, or a call site's precondition. */
+export type GoalKind = "law" | "ensures" | "requires";
+
+export interface Goal {
+  readonly name: string;
+  readonly params: ReadonlyArray<VerifiedParam>;
+  readonly location: SourceLocation;
+}
+
 export interface LoweredLaw {
-  readonly law: VerifiedLaw;
+  readonly kind: GoalKind;
+  readonly law: Goal;
   readonly smtScript: string;
   readonly paramSmtNames: ReadonlyArray<{
     readonly tsName: string;
@@ -115,6 +128,9 @@ export function lowerModuleLaws(
   checker: ts.TypeChecker,
   functions: ReadonlyArray<VerifiedFunction>,
   laws: ReadonlyArray<VerifiedLaw>,
+  ensures: ReadonlyArray<VerifiedEnsures> = [],
+  /** Emit call-site obligations only for functions declared in this file (default: all). */
+  localFile?: ts.SourceFile,
 ): LoweredLaw[] {
   const registry = new RecordRegistry();
 
@@ -131,6 +147,46 @@ export function lowerModuleLaws(
   // dependency order, but a lookup table keeps the call lowering order-independent).
   const fnSmtNames = new Map<ts.FunctionDeclaration, string>();
   functions.forEach((fn, i) => fnSmtNames.set(fn.decl, smtIdent(`fn_${i}`, fn.name)));
+
+  const preSmtNames = new Map<ts.FunctionDeclaration, string>();
+  functions.forEach((fn, i) => {
+    if (fn.requires.length > 0) preSmtNames.set(fn.decl, smtIdent(`pre_${i}`, fn.name));
+  });
+  const app = (name: string, args: ReadonlyArray<string>): string =>
+    args.length > 0 ? `(${name} ${args.join(" ")})` : name;
+
+  // -------------------------------------------------------------------------
+  // Call-site obligations
+  //
+  // A call to a function with `requires` must satisfy it. While lowering, `frames` records
+  // what is known at the current point: enclosing `let` bindings and the conditions under
+  // which this code runs (`if`/ternary branches, the right side of `&&`/`||`, the conclusion
+  // of `implies`). Each call then emits "frames imply the callee's precondition" into `sink`.
+  // -------------------------------------------------------------------------
+  type Frame =
+    | { readonly kind: "let"; readonly v: string; readonly init: string }
+    | { readonly kind: "assume"; readonly cond: string };
+  interface Obligation {
+    readonly callee: string;
+    readonly node: ts.Node;
+    readonly formula: string;
+  }
+  const frames: Frame[] = [];
+  let sink: Obligation[] = [];
+  const closeOver = (body: string): string =>
+    frames.reduceRight(
+      (acc, f) => (f.kind === "let" ? `(let ((${f.v} ${f.init})) ${acc})` : `(=> ${f.cond} ${acc})`),
+      body,
+    );
+  const under = <T>(frame: Frame, fn: () => T): T => {
+    frames.push(frame);
+    try {
+      return fn();
+    } finally {
+      frames.pop();
+    }
+  };
+  const assuming = <T>(cond: string, fn: () => T): T => under({ kind: "assume", cond }, fn);
 
   let freshId = 0;
   const nextVar = (hint: string): string => `v_${freshId++}_${hint.replace(/[^A-Za-z0-9_]/g, "")}`;
@@ -178,8 +234,8 @@ export function lowerModuleLaws(
     if (ts.isConditionalExpression(expr)) {
       const target = expected ?? resolveExprVType(expr);
       const c = lowerExpr(expr.condition, env);
-      const t = lowerExpr(expr.whenTrue, env, target);
-      const f = lowerExpr(expr.whenFalse, env, target);
+      const t = assuming(c, () => lowerExpr(expr.whenTrue, env, target));
+      const f = assuming(`(not ${c})`, () => lowerExpr(expr.whenFalse, env, target));
       return `(ite ${c} ${t} ${f})`;
     }
     if (expected?.kind === "record" && ts.isObjectLiteralExpression(expr)) {
@@ -226,7 +282,15 @@ export function lowerModuleLaws(
     }
     if (ts.isBinaryExpression(expr)) {
       const left = lowerExpr(expr.left, env);
-      const right = lowerExpr(expr.right, env);
+      // JavaScript only evaluates the right side of `&&` when the left is true (and of `||`
+      // when it is false), so calls there only need their preconditions in that case.
+      const op = expr.operatorToken.kind;
+      const right =
+        op === ts.SyntaxKind.AmpersandAmpersandToken
+          ? assuming(left, () => lowerExpr(expr.right, env))
+          : op === ts.SyntaxKind.BarBarToken
+            ? assuming(`(not ${left})`, () => lowerExpr(expr.right, env))
+            : lowerExpr(expr.right, env);
       switch (expr.operatorToken.kind) {
         case ts.SyntaxKind.PlusToken:
           return `(+ ${left} ${right})`;
@@ -287,9 +351,16 @@ export function lowerModuleLaws(
       // modules each defining a private `helper`, must not be confused with one another.
       const callee = resolveCallee(checker, expr.expression);
       if (callee.kind === "runtime" && callee.helper === "implies") {
-        const args = expr.arguments.map((a) => lowerExpr(a, env));
-        if (args.length !== 2) throw new Error("`implies` requires exactly 2 arguments");
-        return `(=> ${args[0]} ${args[1]})`;
+        const [premiseExpr, conclusionExpr] = expr.arguments;
+        if (expr.arguments.length !== 2 || !premiseExpr || !conclusionExpr) {
+          throw new Error("`implies` requires exactly 2 arguments");
+        }
+        // The conclusion is only meaningful when the premise holds, so calls inside it need
+        // their preconditions only then. (At runtime both sides are evaluated, which is
+        // harmless: verified functions are total and `requires` does nothing at runtime.)
+        const premise = lowerExpr(premiseExpr, env);
+        const conclusion = assuming(premise, () => lowerExpr(conclusionExpr, env));
+        return `(=> ${premise} ${conclusion})`;
       }
       if (callee.kind !== "function") {
         throw new Error(`Cannot resolve callee \`${fnName}\` during SMT lowering`);
@@ -303,7 +374,11 @@ export function lowerModuleLaws(
         throw new Error(`Wrong number of arguments in call to \`${fnName}\``);
       }
       const args = expr.arguments.map((a, i) => lowerExpr(a, env, calleeFn.params[i]!.type));
-      return args.length > 0 ? `(${target} ${args.join(" ")})` : target;
+      const pre = preSmtNames.get(callee.decl);
+      if (pre) {
+        sink.push({ callee: calleeFn.name, node: expr, formula: closeOver(app(pre, args)) });
+      }
+      return app(target, args);
     }
 
     throw new Error(`Unsupported expression in SMT lowering: ${ts.SyntaxKind[expr.kind]}`);
@@ -338,7 +413,8 @@ export function lowerModuleLaws(
           const v = nextVar(decl.name.text);
           const nextEnv = new Map(curEnv);
           nextEnv.set(decl.name.text, v);
-          return `(let ((${v} ${initSmt})) ${lowerDeclAt(dIdx + 1, nextEnv)})`;
+          const rest = under({ kind: "let", v, init: initSmt }, () => lowerDeclAt(dIdx + 1, nextEnv));
+          return `(let ((${v} ${initSmt})) ${rest})`;
         }
         const initSmt = lowerExpr(decl.initializer, curEnv);
         if (ts.isObjectBindingPattern(decl.name)) {
@@ -356,7 +432,8 @@ export function lowerModuleLaws(
             if (!field) throw new Error(`Missing destructured field ${propName}`);
             nextEnv.set(el.name.text, `(${field.smtAccessor} ${tmp})`);
           }
-          return `(let ((${tmp} ${initSmt})) ${lowerDeclAt(dIdx + 1, nextEnv)})`;
+          const rest = under({ kind: "let", v: tmp, init: initSmt }, () => lowerDeclAt(dIdx + 1, nextEnv));
+          return `(let ((${tmp} ${initSmt})) ${rest})`;
         }
         throw new Error("Unsupported declaration binding");
       };
@@ -374,10 +451,11 @@ export function lowerModuleLaws(
         }
         throw new Error(`Unsupported if branch: ${ts.SyntaxKind[branch.kind]}`);
       };
-      const thenSmt = lowerBranch(stmt.thenStatement);
-      const elseSmt = stmt.elseStatement
-        ? lowerBranch(stmt.elseStatement)
-        : lowerStatements(stmts, idx + 1, env, ret);
+      const thenSmt = assuming(condSmt, () => lowerBranch(stmt.thenStatement));
+      const elseStmt = stmt.elseStatement;
+      const elseSmt = assuming(`(not ${condSmt})`, () =>
+        elseStmt ? lowerBranch(elseStmt) : lowerStatements(stmts, idx + 1, env, ret),
+      );
       return `(ite ${condSmt} ${thenSmt} ${elseSmt})`;
     }
 
@@ -388,63 +466,206 @@ export function lowerModuleLaws(
     body: ts.Block | ts.Expression,
     env: Map<string, string>,
     ret: VType,
+    /** Leading `requires(...)` statements to skip. */
+    skip = 0,
   ): string => {
     if (ts.isBlock(body)) {
-      return lowerStatements(body.statements, 0, env, ret);
+      return lowerStatements(body.statements, skip, env, ret);
     }
     return lowerExpr(body, env, ret);
+  };
+
+  /** Run `fn` and return the call-site obligations it emitted. */
+  const collecting = (fn: () => void): Obligation[] => {
+    const saved = sink;
+    sink = [];
+    try {
+      fn();
+      return sink;
+    } finally {
+      sink = saved;
+    }
+  };
+
+  interface Pending {
+    readonly kind: GoalKind;
+    readonly goal: Goal;
+    readonly argNames: ReadonlyArray<{ tsName: string; smtName: string; type: VType }>;
+    /** Extra definitions that must follow the function definitions. */
+    readonly defs: ReadonlyArray<string>;
+    readonly assumptions: ReadonlyArray<string>;
+    /** The claim; the query asserts its negation. */
+    readonly claim: string;
+  }
+  const pending: Pending[] = [];
+  let obligationId = 0;
+
+  const argNamesFor = (params: ReadonlyArray<VerifiedParam>) =>
+    params.map((p, i) => ({ tsName: p.name, smtName: smtIdent(`arg_${i}`, p.name), type: p.type }));
+  const obligationGoal = (ob: Obligation, params: ReadonlyArray<VerifiedParam>): Goal => {
+    const location = getLocation(ob.node.getSourceFile(), ob.node);
+    return { name: `requires of ${ob.callee} at line ${location.line}`, params, location };
   };
 
   // Lower all functions first (which also discovers any inline record types used inside bodies).
   const fnDefs: string[] = [];
   for (const fn of functions) {
     const env = new Map<string, string>();
+    const paramNames: string[] = [];
     const paramsSmt = fn.params.map((p, i) => {
       const smtName = smtIdent(`p_${i}`, p.name);
       env.set(p.name, smtName);
+      paramNames.push(smtName);
       return `(${smtName} ${registry.register(p.type)})`;
     });
     const retSort = registry.register(fn.returnType);
-    const bodySmt = lowerBody(fn.body, env, fn.returnType);
+
+    // Preconditions first: each may rely on the ones before it, and the body on all of them.
+    let bodySmt = "";
+    const obligations = collecting(() => {
+      const pres: string[] = [];
+      const lowerRest = (i: number): void => {
+        const req = fn.requires[i];
+        if (!req) {
+          bodySmt = lowerBody(fn.body, env, fn.returnType, fn.requires.length);
+          return;
+        }
+        const term = lowerExpr(req, env);
+        pres.push(term);
+        assuming(term, () => lowerRest(i + 1));
+      };
+      lowerRest(0);
+      const pre = preSmtNames.get(fn.decl);
+      if (pre) {
+        fnDefs.push(
+          `(define-fun ${pre} (${paramsSmt.join(" ")}) Bool\n  ${pres.length === 1 ? pres[0] : `(and ${pres.join(" ")})`})`,
+        );
+      }
+    });
     fnDefs.push(
       `(define-fun ${fnSmtNames.get(fn.decl)!} (${paramsSmt.join(" ")}) ${retSort}\n  ${bodySmt})`,
     );
+
+    if (localFile && fn.decl.getSourceFile() !== localFile) continue;
+    // Obligation formulas mention the function's parameters, so each becomes a predicate over
+    // them, claimed for all arguments. The enclosing `requires` are already inside the formula.
+    const argNames = argNamesFor(fn.params);
+    for (const ob of obligations) {
+      const name = `ob_${obligationId++}`;
+      pending.push({
+        kind: "requires",
+        goal: obligationGoal(ob, fn.params),
+        argNames,
+        defs: [`(define-fun ${name} (${paramsSmt.join(" ")}) Bool\n  ${ob.formula})`],
+        assumptions: [],
+        claim: app(name, argNames.map((a) => a.smtName)),
+      });
+    }
   }
 
-  // Lower each law body first so every inline record type is registered before emitting datatype decls.
-  const loweredLawBodies = laws.map((l) => {
+  for (const l of laws) {
     const env = new Map<string, string>();
-    const paramSmtNames = l.params.map((p, i) => {
-      const smtName = smtIdent(`arg_${i}`, p.name);
-      env.set(p.name, smtName);
-      return { tsName: p.name, smtName, type: p.type };
+    const argNames = argNamesFor(l.params);
+    for (const a of argNames) env.set(a.tsName, a.smtName);
+    let bodySmt = "";
+    const obligations = collecting(() => {
+      bodySmt = lowerBody(l.body, env, { kind: "boolean" });
     });
-    const bodySmt = lowerBody(l.body, env, { kind: "boolean" });
-    return { law: l, paramSmtNames, bodySmt };
-  });
+    for (const ob of obligations) {
+      pending.push({
+        kind: "requires",
+        goal: obligationGoal(ob, l.params),
+        argNames,
+        defs: [],
+        assumptions: [],
+        claim: ob.formula,
+      });
+    }
+    pending.push({ kind: "law", goal: l, argNames, defs: [], assumptions: [], claim: bodySmt });
+  }
+
+  const ensuresCount = new Map<ts.FunctionDeclaration, number>();
+  for (const e of ensures) {
+    const fnSmt = fnSmtNames.get(e.fn);
+    const fn = functions.find((f) => f.decl === e.fn);
+    if (!fnSmt || !fn) throw new Error(`\`ensures\` refers to unknown function \`${e.fnName}\``);
+    if (e.params.length !== fn.params.length + 1) {
+      throw new Error(`Postcondition of \`${e.fnName}\` has the wrong number of parameters`);
+    }
+    const n = (ensuresCount.get(e.fn) ?? 0) + 1;
+    ensuresCount.set(e.fn, n);
+
+    const inputs = e.params.slice(0, -1);
+    const resultParam = e.params[e.params.length - 1]!;
+    const env = new Map<string, string>();
+    const argNames = argNamesFor(inputs);
+    for (const a of argNames) env.set(a.tsName, a.smtName);
+    const args = argNames.map((a) => a.smtName);
+    const pre = preSmtNames.get(e.fn);
+    const assumptions = pre ? [app(pre, args)] : [];
+    const result = nextVar("result");
+    env.set(resultParam.name, result);
+    const resultInit = app(fnSmt, args);
+
+    let postSmt = "";
+    const obligations = collecting(() => {
+      const lowerPost = (): void => {
+        under({ kind: "let", v: result, init: resultInit }, () => {
+          postSmt = lowerBody(e.body, env, { kind: "boolean" });
+        });
+      };
+      if (pre) assuming(app(pre, args), lowerPost);
+      else lowerPost();
+    });
+    for (const ob of obligations) {
+      pending.push({
+        kind: "requires",
+        goal: obligationGoal(ob, inputs),
+        argNames,
+        defs: [],
+        assumptions: [],
+        claim: ob.formula,
+      });
+    }
+    pending.push({
+      kind: "ensures",
+      goal: {
+        name: `ensures ${e.fnName}${n > 1 ? ` #${n}` : ""}`,
+        params: inputs,
+        location: e.location,
+      },
+      argNames,
+      defs: [],
+      assumptions,
+      claim: `(let ((${result} ${resultInit})) ${postSmt})`,
+    });
+  }
 
   const datatypeDecls = registry.emitDeclarations();
   const recordsByCtor = registry.byCtorMap();
 
-  return loweredLawBodies.map(({ law, paramSmtNames, bodySmt }) => {
+  return pending.map(({ kind, goal, argNames, defs, assumptions, claim }) => {
     const lines: string[] = [
       // JSON-quoted: a raw newline in the name would end the comment and inject SMT commands.
-      `; tslaw law: ${JSON.stringify(law.name)}`,
+      `; tslaw ${kind}: ${JSON.stringify(goal.name)}`,
       "(set-option :produce-models true)",
       ...datatypeDecls,
       ...fnDefs,
-      ...paramSmtNames.map((p) => `(declare-const ${p.smtName} ${registry.register(p.type)})`),
-      `; Assert negation: unsat => law holds for ALL inputs`,
-      `(assert (not ${bodySmt}))`,
+      ...defs,
+      ...argNames.map((p) => `(declare-const ${p.smtName} ${registry.register(p.type)})`),
+      ...assumptions.map((a) => `(assert ${a})`),
+      `; Assert negation: unsat => the claim holds for ALL inputs`,
+      `(assert (not ${claim}))`,
       "(check-sat)",
     ];
-    if (paramSmtNames.length > 0) {
-      lines.push(`(get-value (${paramSmtNames.map((p) => p.smtName).join(" ")}))`);
+    if (argNames.length > 0) {
+      lines.push(`(get-value (${argNames.map((p) => p.smtName).join(" ")}))`);
     }
     return {
-      law,
+      kind,
+      law: goal,
       smtScript: lines.join("\n") + "\n",
-      paramSmtNames,
+      paramSmtNames: argNames,
       recordsByCtor,
     };
   });

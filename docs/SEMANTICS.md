@@ -215,6 +215,39 @@ For a law `law("name", (x1: T1, ..., xn: Tn) => body)` the query sent to Z3 is:
 
 SMT identifiers are made unique by an index (`fn_3_name`, `p_0_x`), never by the TypeScript name alone, and no user-controlled text is written into the script unescaped.
 
+### Contracts
+
+A function body may begin with `requires(c1); ...; requires(ck);` and a module may contain `ensures(f, (x1, ..., xn, result) => post)`. Neither changes what any function evaluates to: `requires` and `ensures` are no-ops at runtime, and the definition `f'` above is built from the body after the `requires` statements. They add queries.
+
+Write `pre_f(x1..xn)` for `c1 and ... and ck` (or `true` when `f` has no `requires`).
+
+**Call-site obligations.** For every call `g(e1..em)` to a function with `requires`, occurring in a function body, a law, a postcondition or a later `requires`, one query claims
+
+```
+context  =>  pre_g(T[e1], ..., T[em])
+```
+
+for all values of the enclosing parameters. `context` is everything known at that point: the enclosing function's own `requires` (those before the call, if the call is itself inside a `requires`), the `const` bindings in scope, and the conditions under which the call is reached:
+
+| The call is in | Added to the context |
+|---|---|
+| the then-branch of `if (c)` or `c ? ... : ...` | `c` |
+| the else-branch, or the code after `if (c) return ...;` | `not c` |
+| the right operand of `a && ...` | `a` |
+| the right operand of `a || ...` | `not a` |
+| the second argument of `implies(p, ...)` | `p` |
+
+The first four rows match exactly when JavaScript evaluates the call. The last does not: `implies` is an ordinary function, so at runtime its second argument is evaluated even when `p` is false. That is harmless here because verified functions are total and `requires` does nothing at runtime, and it lets a law state a hypothesis in the natural way.
+
+**Postconditions.** `ensures(f, (x1..xn, result) => post)` produces the query
+
+```
+(assert pre_f(a1..an))
+(assert (not (let ((result (f' a1..an))) T[post])))
+```
+
+**What contracts add to the theorems.** Function calls are still translated through their definitions, so the theorems of section 6 hold whether or not the obligations are proved. If all call-site obligations in a module are `PROVED`, then additionally: in any evaluation that starts from a law, or from a function whose `requires` holds, every call reached under the conditions in the table above satisfies its callee's `requires`.
+
 ## 5. Verdicts
 
 | Z3 answers | Verdict | Meaning |
