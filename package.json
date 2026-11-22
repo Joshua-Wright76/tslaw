@@ -1,0 +1,26 @@
+{
+  "name": "vscript",
+  "version": "0.1.0",
+  "description": "Verified TypeScript dialect — compile-time formal verification of pure TS subsets via Z3",
+  "type": "module",
+  "bin": {
+    "vscript": "./dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js",
+    "./runtime": "./dist/runtime.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "vscript": "node dist/cli.js"
+  },
+  "dependencies": {
+    "typescript": "^5.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "vitest": "^3.2.0"
+  }
+}
