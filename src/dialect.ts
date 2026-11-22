@@ -178,11 +178,25 @@ export function resolveVType(
 export function analyzeDialect(
   sf: ts.SourceFile,
   checker: ts.TypeChecker,
+  visited = new Map<string, DialectAnalysis>(),
 ): DialectAnalysis {
+  const cached = visited.get(sf.fileName);
+  if (cached) return cached;
+
   const hasVerifiedDirective = hasUseVerifiedDirective(sf);
   const diagnostics: Diagnostic[] = [];
   const functions: VerifiedFunction[] = [];
+  const importedFunctions = new Map<string, VerifiedFunction>();
   const laws: VerifiedLaw[] = [];
+
+  // Pre-seed cache to guard against cyclic imports.
+  const stub: DialectAnalysis = {
+    hasVerifiedDirective,
+    diagnostics,
+    functions,
+    laws,
+  };
+  visited.set(sf.fileName, stub);
 
   const addError = (code: string, message: string, node: ts.Node): void => {
     diagnostics.push({
@@ -201,26 +215,65 @@ export function analyzeDialect(
     }
   }
 
-  // Track which runtime identifiers were imported from vscript runtime
+  // Track runtime imports (`law`, `implies`) and cross-file `"use verified";` imports.
   const importedRuntimeNames = new Set<string>();
+  const analyzedDeps = new Set<string>();
   for (const stmt of sf.statements) {
-    if (ts.isImportDeclaration(stmt) && stmt.importClause?.namedBindings) {
-      if (ts.isNamedImports(stmt.importClause.namedBindings)) {
-        for (const elem of stmt.importClause.namedBindings.elements) {
-          const orig = elem.propertyName?.text ?? elem.name.text;
-          if (RUNTIME_HELPERS.has(orig)) {
-            importedRuntimeNames.add(elem.name.text);
-          } else {
-            addError(
-              "VS001",
-              `Verified modules may only import \`law\` and \`implies\` from vscript runtime (found \`${orig}\`)`,
-              elem,
-            );
+    if (!ts.isImportDeclaration(stmt) || !stmt.importClause) continue;
+    if (stmt.importClause.isTypeOnly) continue;
+    if (!stmt.importClause.namedBindings) {
+      addError("VS001", "Default imports are not allowed in verified modules", stmt);
+      continue;
+    }
+    if (!ts.isNamedImports(stmt.importClause.namedBindings)) {
+      addError("VS001", "Namespace imports are not allowed in verified modules", stmt);
+      continue;
+    }
+    for (const elem of stmt.importClause.namedBindings.elements) {
+      if (elem.isTypeOnly) continue;
+      const orig = elem.propertyName?.text ?? elem.name.text;
+      if (RUNTIME_HELPERS.has(orig)) {
+        importedRuntimeNames.add(elem.name.text);
+        continue;
+      }
+      const sym = checker.getSymbolAtLocation(elem.name);
+      const target = sym && (sym.flags & ts.SymbolFlags.Alias) !== 0
+        ? checker.getAliasedSymbol(sym)
+        : sym;
+      const decl = target?.valueDeclaration ?? target?.declarations?.[0];
+      if (decl && (ts.isTypeAliasDeclaration(decl) || ts.isInterfaceDeclaration(decl))) {
+        continue;
+      }
+      if (decl && ts.isFunctionDeclaration(decl)) {
+        const depSf = decl.getSourceFile();
+        if (!hasUseVerifiedDirective(depSf)) {
+          addError(
+            "VS001",
+            `Imported function \`${orig}\` is from an unverified module (add \`"use verified";\` to ${depSf.fileName})`,
+            elem,
+          );
+          continue;
+        }
+        if (!analyzedDeps.has(depSf.fileName)) {
+          analyzedDeps.add(depSf.fileName);
+          const depAnalysis = analyzeDialect(depSf, checker, visited);
+          diagnostics.push(...depAnalysis.diagnostics);
+          for (const depFn of depAnalysis.functions) {
+            importedFunctions.set(depFn.name, depFn);
           }
         }
-      } else {
-        addError("VS001", "Namespace imports are not allowed in verified modules", stmt);
+        if (elem.propertyName && elem.propertyName.text !== elem.name.text) {
+          addError("VS001", "Aliased function imports (`as`) are not yet supported in verified modules", elem);
+          continue;
+        }
+        declaredFnNames.add(elem.name.text);
+        continue;
       }
+      addError(
+        "VS001",
+        `Verified modules may only import \`law\`, \`implies\`, types, or functions from other \`"use verified";\` modules (found \`${orig}\`)`,
+        elem,
+      );
     }
   }
 
@@ -659,8 +712,9 @@ export function analyzeDialect(
     );
   }
 
-  // Third pass: check call graph for recursion / cycles (guarantees termination).
-  const fnMap = new Map(functions.map((f) => [f.name, f]));
+  // Third pass: merge imported verified functions and topologically sort call graph.
+  const allFunctions: VerifiedFunction[] = [...importedFunctions.values(), ...functions];
+  const fnMap = new Map(allFunctions.map((f) => [f.name, f]));
   const color = new Map<string, 0 | 1 | 2>(); // 0=unvisited, 1=visiting, 2=done
   const ordered: VerifiedFunction[] = [];
 
@@ -686,16 +740,18 @@ export function analyzeDialect(
     ordered.push(fn);
   };
 
-  for (const fn of functions) {
+  for (const fn of allFunctions) {
     if ((color.get(fn.name) ?? 0) === 0) {
       dfs(fn.name, [fn.name]);
     }
   }
 
-  return {
+  const result: DialectAnalysis = {
     hasVerifiedDirective,
     diagnostics,
     functions: ordered,
     laws,
   };
+  visited.set(sf.fileName, result);
+  return result;
 }

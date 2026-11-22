@@ -150,4 +150,36 @@ law("swap preserves order (false!)", (p: Pair) => {
     const raw = fail.counterexample![0]!.raw as { a: bigint; b: bigint };
     expect(raw.a).not.toBe(raw.b);
   });
+
+  it("supports importing pure functions from another 'use verified' module", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vscript-xfile-"));
+    tmpDirs.push(dir);
+    const runtimePath = path.resolve("src/runtime.ts").replace(/\.ts$/, ".js");
+    fs.writeFileSync(
+      path.join(dir, "core.ts"),
+      `"use verified";
+export type Delta = { readonly next: bigint; readonly changed: boolean };
+export function clampAdd(x: bigint, d: bigint, max: bigint): Delta {
+  if (d <= 0n || x >= max) return { next: x, changed: false };
+  const sum = x + d;
+  return sum > max ? { next: max, changed: true } : { next: sum, changed: true };
+}
+`,
+    );
+    const lawFile = path.join(dir, "core.law.ts");
+    fs.writeFileSync(
+      lawFile,
+      `"use verified";
+import { law, implies } from "${runtimePath}";
+import { clampAdd } from "./core.js";
+law("clampAdd never exceeds max", (x: bigint, d: bigint, max: bigint) => {
+  const res = clampAdd(x, d, max);
+  return implies(x <= max, res.next <= max && res.next >= x);
+});
+`,
+    );
+    const report = await verifyFiles([lawFile]);
+    expect(report.ok).toBe(true);
+    expect(report.summary.proved).toBe(1);
+  });
 });

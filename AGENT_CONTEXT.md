@@ -25,7 +25,7 @@ Initial prototype (`0.1.0`) implementing **vscript**, a strict verifiable subset
 Implemented:
 - Three-stage verification pipeline (`src/verify.ts`):
   1. Strict TypeScript typechecking via the TypeScript Compiler API (`strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`).
-  2. Strict dialect / soundness checker (`src/dialect.ts`) for `"use verified";` modules (bans `any`, casts, mutation, loops, `throw`/`try`, `number` floats, side effects, and recursive cycles).
+  2. Strict dialect / soundness checker (`src/dialect.ts`) for `"use verified";` modules (bans `any`, casts, mutation, loops, `throw`/`try`, `number` floats, side effects, and recursive cycles; supports importing pure verified functions and types from other `"use verified";` modules).
   3. SMT-LIB2 lowering (`src/smt.ts`) and Z3 solver runner (`src/z3.ts`) supporting `bigint` (`Int`), `boolean` (`Bool`), immutable `readonly` record types (`declare-datatypes`), `const` bindings, `if`/`else` with early returns, ternaries, helper function calls, and `implies(a, b)`.
 - Runtime shim (`src/runtime.ts`) exporting zero-cost `law(name, fn)` and `implies(p, q)` so verified files remain valid standard TypeScript.
 - CLI (`src/cli.ts`, `vscript check <files...> [--emit-smt] [--json] [--timeout <ms>]`) reporting `PROVED`, `DISPROVED` (with concrete counterexamples), `UNKNOWN`, `DIALECT ERROR`, and `TYPE ERROR`.
