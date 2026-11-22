@@ -25,3 +25,14 @@ jobs:
       - run: npm test
       - name: Check the examples with the built CLI
         run: node dist/cli.js check examples/tokens.law.ts examples/bank.law.ts
+
+  proofs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Lean (version pinned in proofs/lean-toolchain)
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Check the machine-checked core proofs
+        run: cd proofs && lean Core.lean

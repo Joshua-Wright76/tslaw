@@ -230,7 +230,7 @@
           <div class="list">
             <h3 class="bad" data-at="5">Rejected, and why</h3>
             <div data-at="5.5"><code>number</code><small>floating point isn't exact</small></div>
-            <div data-at="7"><code>let  loops  recursion</code><small>must be pure and must finish</small></div>
+            <div data-at="7"><code>var  for  endless loops</code><small>must be pure and must finish</small></div>
             <div data-at="8.5"><code>any  as  !</code><small>they let types lie</small></div>
             <div data-at="10"><code>/  %</code><small>JS rounds differently from Z3</small></div>
             <div data-at="11.5"><code>throw  async</code><small>a function is just inputs to output</small></div>
@@ -322,7 +322,7 @@
         <div class="limits">
           <div data-at="10.5"><b>It proves your laws,</b> not that you wrote the right laws.</div>
           <div data-at="12.5"><b>law() does nothing at runtime.</b> The checking all happens before you ship.</div>
-          <div data-at="14.5"><b>Unverified callers aren't checked.</b> Proofs cover well-typed inputs only.</div>
+          <div data-at="14.5"><b>Unverified callers aren't checked,</b> unless they go through a generated guard.</div>
         </div>
         <div class="caption">
           <span data-at="0.2" data-until="10">A proof is only as good as the translation, so the test suite cross-checks it against real runs.</span>
@@ -331,6 +331,26 @@
       </section>
 
       <!-- 11 -->
+      <section class="scene" data-dur="21" data-title="Beyond one-liners">
+        <div class="kicker">More than arithmetic</div>
+        <h2>The same question, asked of bigger code</h2>
+        <div class="three">
+          <div class="card" data-at="1.5"><b class="acc">Contracts</b><code>requires</code> is proved at every call. <code>ensures</code> is proved for every input that meets it.</div>
+          <div class="card" data-at="4.5"><b class="acc">Recursion and loops</b>Each states a measure that shrinks, so it provably ends. Loops also state an invariant.</div>
+          <div class="card" data-at="7.5"><b class="acc">Arrays</b>Every <code>at(xs, i)</code> is proved to be in range before the code ever runs.</div>
+        </div>
+        <div class="limits">
+          <div data-at="11.5"><b>A second solver.</b> <code>--cross-check</code> has cvc5 confirm each verdict.</div>
+          <div data-at="13.5"><b>Guards.</b> <code>tslaw guard</code> writes runtime-checked entry points for other callers.</div>
+          <div data-at="15.5"><b>A proof of the prover.</b> For the core language, the translation is proved correct in Lean.</div>
+        </div>
+        <div class="caption">
+          <span data-at="0.2" data-until="11">"Can any input break this?" also works for functions that call, loop and index.</span>
+          <span data-at="11">And three things reduce how much you take on trust.</span>
+        </div>
+      </section>
+
+      <!-- 12 -->
       <section class="scene" data-dur="9" data-title="Try it">
         <div class="center">
           <h2 data-at="0.2">Try it</h2>
