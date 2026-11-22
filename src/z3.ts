@@ -105,14 +105,57 @@ export interface Z3RunResult {
   readonly reason?: string;
 }
 
-export async function runZ3(
+export function runZ3(
   lowered: LoweredLaw,
   options: { timeoutMs: number; z3Path: string },
 ): Promise<Z3RunResult> {
+  return runSolver(lowered, {
+    name: "Z3",
+    path: options.z3Path,
+    args: ["-in", "-smt2", `-T:${Math.max(1, Math.ceil(options.timeoutMs / 1000))}`],
+    timeoutMs: options.timeoutMs,
+    installHint:
+      "Install it (`brew install z3`, `apt-get install z3`) or point to it with --z3 / TSLAW_Z3.",
+  });
+}
+
+/**
+ * Run the same query through cvc5, an independently developed solver. For `unsat` cvc5 also
+ * builds a proof and checks it with its internal proof checker (`--check-proofs`); for `sat`
+ * it checks the model against the assertions (`--check-models`).
+ */
+export function runCvc5(
+  lowered: LoweredLaw,
+  options: { timeoutMs: number; cvc5Path: string },
+): Promise<Z3RunResult> {
+  return runSolver(lowered, {
+    name: "cvc5",
+    path: options.cvc5Path,
+    args: [
+      "--lang", "smt2", "-q",
+      `--tlimit=${Math.max(1, Math.ceil(options.timeoutMs))}`,
+      "--produce-models", "--check-proofs", "--check-models",
+    ],
+    timeoutMs: options.timeoutMs,
+    installHint:
+      "Install it (https://cvc5.github.io/downloads.html) or point to it with --cvc5 / TSLAW_CVC5.",
+  });
+}
+
+interface SolverSpec {
+  readonly name: string;
+  readonly path: string;
+  readonly args: ReadonlyArray<string>;
+  readonly timeoutMs: number;
+  readonly installHint: string;
+}
+
+async function runSolver(lowered: LoweredLaw, solver: SolverSpec): Promise<Z3RunResult> {
   const start = performance.now();
+  const options = { timeoutMs: solver.timeoutMs };
 
   return await new Promise<Z3RunResult>((resolve) => {
-    const child = spawn(options.z3Path, ["-in", "-smt2", `-T:${Math.max(1, Math.ceil(options.timeoutMs / 1000))}`], {
+    const child = spawn(solver.path, [...solver.args], {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -132,7 +175,7 @@ export async function runZ3(
       finish({
         status: "unknown",
         durationMs: Math.round(performance.now() - start),
-        reason: `Z3 timed out after ${options.timeoutMs}ms`,
+        reason: `${solver.name} timed out after ${options.timeoutMs}ms`,
       });
     }, options.timeoutMs + 500);
 
@@ -147,9 +190,7 @@ export async function runZ3(
       finish({
         status: "error",
         durationMs: Math.round(performance.now() - start),
-        reason:
-          `Could not run Z3 (\`${options.z3Path}\`): ${err.message}. ` +
-          "Install it (`brew install z3`, `apt-get install z3`) or point to it with --z3 / TSLAW_Z3.",
+        reason: `Could not run ${solver.name} (\`${solver.path}\`): ${err.message}. ${solver.installHint}`,
       });
     });
 
@@ -172,7 +213,7 @@ export async function runZ3(
         finish({
           status: "error",
           durationMs,
-          reason: `Z3 rejected the generated SMT-LIB2 (this is a bug in the verifier, please report it): ${messages.join("; ")}`.slice(0, 600),
+          reason: `${solver.name} rejected the generated SMT-LIB2 (this is a bug in the verifier, please report it): ${messages.join("; ")}`.slice(0, 600),
         });
         return;
       }
@@ -215,11 +256,17 @@ export async function runZ3(
         return;
       }
 
+      // cvc5 reports a hit time limit as a message and a non-zero exit, not as a verdict.
+      if (/interrupted by timeout/.test(stdout + stderr)) {
+        finish({ status: "unknown", durationMs, reason: `${solver.name} timed out after ${options.timeoutMs}ms` });
+        return;
+      }
+
       if (verdict === "unknown" || verdict === "timeout") {
         finish({
           status: "unknown",
           durationMs,
-          reason: stderr.trim() || `Z3 returned \`${verdict}\``,
+          reason: stderr.trim() || `${solver.name} returned \`${verdict}\``,
         });
         return;
       }
@@ -227,7 +274,7 @@ export async function runZ3(
       finish({
         status: "error",
         durationMs,
-        reason: (stderr.trim() || stdout.trim() || "Unexpected Z3 output").slice(0, 500),
+        reason: (stderr.trim() || stdout.trim() || `Unexpected ${solver.name} output`).slice(0, 500),
       });
     });
 

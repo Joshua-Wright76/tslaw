@@ -39,6 +39,14 @@ export interface LawResult {
   readonly counterexample?: ReadonlyArray<CounterexampleEntry>;
   readonly smt?: string;
   readonly reason?: string;
+  /**
+   * Present when cross-checking with cvc5 was requested.
+   * - `confirmed`: cvc5 reached the same verdict (for PROVED, with a proof its checker accepted).
+   * - `unconfirmed`: cvc5 could not decide; the verdict rests on Z3 alone.
+   * - `cvc5-only`: Z3 could not decide; the verdict comes from cvc5 alone.
+   * A disagreement between the solvers is reported as status `error`.
+   */
+  readonly crossCheck?: "confirmed" | "unconfirmed" | "cvc5-only";
 }
 
 export interface FileVerificationResult {
@@ -57,6 +65,10 @@ export interface VerifyOptions {
   readonly z3Path?: string;
   /** Verify files even without a top-level "use verified" directive. */
   readonly requireDirective?: boolean;
+  /** Also run every law through cvc5 and require it to agree with Z3. */
+  readonly crossCheck?: boolean;
+  /** Explicit path to the cvc5 binary (default: TSLAW_CVC5 env or "cvc5"). */
+  readonly cvc5Path?: string;
   /** Maximum concurrent Z3 solver processes (default: 8). */
   readonly concurrency?: number;
 }
@@ -71,5 +83,7 @@ export interface VerifyReport {
     readonly disproved: number;
     readonly unknown: number;
     readonly errors: number;
+    /** Laws whose verdict cvc5 confirmed; present when cross-checking was requested. */
+    readonly confirmed?: number;
   };
 }

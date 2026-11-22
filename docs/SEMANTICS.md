@@ -246,7 +246,7 @@ A `PROVED` verdict is only as trustworthy as each of these:
 1. **This document's argument**, which is informal.
 2. **The implementation follows this document.** Checked by tests, not proved. `test/fuzz.test.ts` generates random programs in the subset, runs them in JavaScript, and requires the prover to agree; `test/soundness.test.ts` runs every proved law on random inputs and replays every counterexample.
 3. **TypeScript's type checker is sound on the subset** (section 2).
-4. **Z3 is correct**, including its answer `unsat`.
+4. **Z3 is correct**, including its answer `unsat`. With `--cross-check` this is weakened to "Z3 and cvc5 are not both wrong in the same way": cvc5 must independently reach the same verdict, and for `unsat` must produce a proof that its own proof checker accepts.
 5. **The JavaScript engine implements `bigint` and object semantics as specified.** A real engine also has finite memory: a `bigint` computation can throw `RangeError` when a value is too large to represent, which the model ignores.
 6. **Callers respect the types.** The theorem quantifies over well-typed inputs. Unverified code that passes ill-typed values (through `any`, casts or plain JavaScript) is outside it.
 7. **The law says what you meant.** tslaw proves the laws that are written, nothing more.

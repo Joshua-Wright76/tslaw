@@ -12,6 +12,7 @@
  * Environment:
  *   TSLAW_FUZZ_SEED   first seed (default 1)
  *   TSLAW_FUZZ_RUNS   number of generated modules (default 10)
+ *   TSLAW_FUZZ_CROSS_CHECK=1   also require cvc5 to agree with Z3 on every law
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -95,7 +96,8 @@ describe("fuzz: the SMT model agrees with JavaScript on generated programs", () 
         lawFiles.push(lawFile);
       }
 
-      const report = await verifyFiles(lawFiles, { timeoutMs: 20_000 });
+      const crossCheck = process.env["TSLAW_FUZZ_CROSS_CHECK"] === "1";
+      const report = await verifyFiles(lawFiles, { timeoutMs: 20_000, crossCheck });
       const problems: string[] = [];
       for (const file of report.files) {
         const name = path.basename(file.file);
@@ -104,6 +106,9 @@ describe("fuzz: the SMT model agrees with JavaScript on generated programs", () 
         }
         for (const l of file.laws) {
           const want = l.name.startsWith("ok ") ? "proved" : "disproved";
+          if (crossCheck && l.crossCheck !== "confirmed") {
+            problems.push(`${name}: "${l.name}" was not confirmed by cvc5 (${l.crossCheck ?? l.reason ?? l.status})`);
+          }
           if (l.status !== want) {
             problems.push(`${name}: "${l.name}" should be ${want} but was ${l.status}${l.reason ? ` (${l.reason})` : ""}`);
           }

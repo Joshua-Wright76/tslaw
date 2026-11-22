@@ -58,7 +58,19 @@ tslaw check <file1.ts> [file2.ts ...] [options]
   --timeout <ms>     Per-law Z3 timeout in ms (default: 5000)
   --z3 <path>        Path to the z3 binary (default: TSLAW_Z3 or 'z3')
   --all              Check files even without a "use verified"; directive
+  --cross-check      Also run every law through cvc5 and require it to agree with Z3
+  --cvc5 <path>      Path to the cvc5 binary (default: TSLAW_CVC5 or 'cvc5')
 ```
+
+### Cross-checking with a second solver
+
+With `--cross-check`, every law is also sent to [cvc5](https://cvc5.github.io/), a solver developed independently of Z3. For a proof, cvc5 must produce its own proof and pass it through its internal proof checker; for a counterexample, it must find one and validate it. Each verdict is then marked:
+
+- `confirmed by cvc5`: both solvers agree.
+- `NOT confirmed`: cvc5 could not decide in time, so the verdict rests on Z3 alone.
+- `by cvc5 only`: Z3 could not decide, and the verdict is cvc5's.
+
+If the two solvers ever give opposite answers, the law is reported as an error instead of a verdict. This guards against a bug in either solver; it does not check tslaw's own translation, which both solvers receive identically.
 
 The exit code is `0` only if every law is proved and there are no errors, so it can gate CI.
 

@@ -132,7 +132,7 @@ export function expr(ctx: Ctx, type: TypeName, depth: number, noLiteral = false)
     if (c) return c;
   }
   if (r < 0.45) {
-    return `(${expr(ctx, "boolean", depth - 1)} ? ${expr(ctx, type, depth - 1)} : ${expr(ctx, type, depth - 1)})`;
+    return `(${expr(ctx, "boolean", depth - 1)} ? ${expr(ctx, type, depth - 1, noLiteral)} : ${expr(ctx, type, depth - 1, noLiteral)})`;
   }
   switch (type) {
     case "bigint": {

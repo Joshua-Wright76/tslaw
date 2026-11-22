@@ -9,7 +9,7 @@ import type {
   VerifyOptions,
   VerifyReport,
 } from "./types.js";
-import { runZ3 } from "./z3.js";
+import { runCvc5, runZ3, type Z3RunResult } from "./z3.js";
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
@@ -40,6 +40,8 @@ export async function verifyFiles(
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const z3Path = options.z3Path ?? process.env["TSLAW_Z3"] ?? "z3";
   const requireDirective = options.requireDirective ?? true;
+  const cvc5Path = options.cvc5Path ?? process.env["TSLAW_CVC5"] ?? "cvc5";
+  let confirmed = 0;
 
   const compilerOptions: ts.CompilerOptions = {
     target: ts.ScriptTarget.ES2022,
@@ -182,7 +184,32 @@ export async function verifyFiles(
       while (nextIdx < loweredLaws.length) {
         const idx = nextIdx++;
         const lowered = loweredLaws[idx]!;
-        const z3Res = await runZ3(lowered, { timeoutMs, z3Path });
+        const z3Only = await runZ3(lowered, { timeoutMs, z3Path });
+        let z3Res: Z3RunResult = z3Only;
+        let crossCheck: LawResult["crossCheck"];
+        if (options.crossCheck && z3Only.status !== "error") {
+          const other = await runCvc5(lowered, { timeoutMs, cvc5Path });
+          const decided = (s: string): boolean => s === "proved" || s === "disproved";
+          if (other.status === "error") {
+            z3Res = { ...other, durationMs: z3Only.durationMs + other.durationMs };
+          } else if (decided(z3Only.status) && decided(other.status)) {
+            if (z3Only.status === other.status) {
+              crossCheck = "confirmed";
+              confirmed++;
+            } else {
+              z3Res = {
+                status: "error",
+                durationMs: z3Only.durationMs + other.durationMs,
+                reason: `SOLVERS DISAGREE: Z3 says ${z3Only.status}, cvc5 says ${other.status}. One of them is wrong; do not trust either verdict, and please report this.`,
+              };
+            }
+          } else if (decided(z3Only.status)) {
+            crossCheck = "unconfirmed";
+          } else if (decided(other.status)) {
+            z3Res = other;
+            crossCheck = "cvc5-only";
+          }
+        }
         if (z3Res.status === "proved") proved++;
         else if (z3Res.status === "disproved") disproved++;
         else if (z3Res.status === "unknown") unknown++;
@@ -198,6 +225,7 @@ export async function verifyFiles(
           ...(z3Res.counterexample ? { counterexample: z3Res.counterexample } : {}),
           ...(options.emitSmt ? { smt: lowered.smtScript } : {}),
           ...(z3Res.reason ? { reason: z3Res.reason } : {}),
+          ...(crossCheck ? { crossCheck } : {}),
         };
       }
     };
@@ -224,6 +252,7 @@ export async function verifyFiles(
       disproved,
       unknown,
       errors,
+      ...(options.crossCheck ? { confirmed } : {}),
     },
   };
 }

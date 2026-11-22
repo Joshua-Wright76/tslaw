@@ -14,6 +14,8 @@ function usage(): string {
     "  --json             Output machine-readable JSON report",
     "  --timeout <ms>     Per-law Z3 timeout in ms (default: 5000)",
     "  --z3 <path>        Path to z3 binary (default: TSLAW_Z3 or 'z3')",
+    "  --cross-check      Also run every law through cvc5 and require it to agree with Z3",
+    "  --cvc5 <path>      Path to cvc5 binary (default: TSLAW_CVC5 or 'cvc5')",
     "  --all              Verify files even without a '\"use verified\";' directive",
   ].join("\n");
 }
@@ -41,12 +43,22 @@ async function main(): Promise<void> {
   let timeoutMs = 5000;
   let z3Path: string | undefined;
   let requireDirective = true;
+  let crossCheck = false;
+  let cvc5Path: string | undefined;
 
   for (let i = 1; i < args.length; i++) {
     const a = args[i]!;
     if (a === "--emit-smt") emitSmt = true;
     else if (a === "--json") json = true;
     else if (a === "--all") requireDirective = false;
+    else if (a === "--cross-check") crossCheck = true;
+    else if (a === "--cvc5") {
+      cvc5Path = args[++i];
+      if (!cvc5Path) {
+        console.error("--cvc5 requires a path to the cvc5 binary");
+        process.exit(2);
+      }
+    }
     else if (a === "--timeout") {
       const next = args[++i];
       const parsed = Number(next);
@@ -78,7 +90,9 @@ async function main(): Promise<void> {
     emitSmt,
     timeoutMs,
     requireDirective,
+    crossCheck,
     ...(z3Path ? { z3Path } : {}),
+    ...(cvc5Path ? { cvc5Path } : {}),
   });
 
   if (json) {
@@ -120,7 +134,15 @@ async function main(): Promise<void> {
     }
 
     for (const l of f.laws) {
-      const time = `${l.durationMs}ms`;
+      const note =
+        l.crossCheck === "confirmed"
+          ? ", confirmed by cvc5"
+          : l.crossCheck === "unconfirmed"
+            ? ", NOT confirmed: cvc5 could not decide"
+            : l.crossCheck === "cvc5-only"
+              ? ", by cvc5 only: Z3 could not decide"
+              : "";
+      const time = `${l.durationMs}ms${note}`;
       if (l.status === "proved") {
         console.log(`  PROVED    "${l.name}" (${time})`);
       } else if (l.status === "disproved") {
@@ -145,7 +167,8 @@ async function main(): Promise<void> {
 
   const s = report.summary;
   console.log(
-    `\nSummary: ${s.proved} proved, ${s.disproved} disproved, ${s.unknown} unknown, ${s.errors} errors (${s.verifiedFiles}/${s.totalFiles} verified files)`,
+    `\nSummary: ${s.proved} proved, ${s.disproved} disproved, ${s.unknown} unknown, ${s.errors} errors (${s.verifiedFiles}/${s.totalFiles} verified files)` +
+      (s.confirmed !== undefined ? `\nCross-check: cvc5 confirmed ${s.confirmed} of ${s.proved + s.disproved} verdicts` : ""),
   );
   process.exitCode = report.ok ? 0 : 1;
 }
