@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path";
+import fs from "node:fs";
+import { generateGuards } from "./guard.js";
 import { verifyFiles } from "./verify.js";
 
 function usage(): string {
@@ -9,7 +11,15 @@ function usage(): string {
     "Usage:",
     "  tslaw check <file1.ts> [file2.ts ...] [options]",
     "",
-    "Options:",
+    "  tslaw guard <file1.ts> [file2.ts ...] [--check]",
+    "",
+    "Commands:",
+    "  check              Prove the laws and contracts in verified modules",
+    "  guard              Write <name>.guarded.ts next to each verified module: wrappers that",
+    "                     check argument types and `requires` at runtime, for unverified callers.",
+    "                     With --check, only report whether the files on disk are up to date.",
+    "",
+    "Options for check:",
     "  --emit-smt         Print generated SMT-LIB2 for each law",
     "  --json             Output machine-readable JSON report",
     "  --timeout <ms>     Per-law Z3 timeout in ms (default: 5000)",
@@ -24,6 +34,53 @@ function rel(file: string): string {
   return path.relative(process.cwd(), file) || file;
 }
 
+function runGuard(args: string[]): void {
+  const checkOnly = args.includes("--check");
+  const unknown = args.find((a) => a.startsWith("-") && a !== "--check");
+  if (unknown) {
+    console.error(`Unknown flag: ${unknown}`);
+    process.exit(2);
+  }
+  const files = args.filter((a) => !a.startsWith("-"));
+  if (files.length === 0) {
+    console.error("No files specified.\n\n" + usage());
+    process.exit(2);
+  }
+
+  let failed = false;
+  for (const r of generateGuards(files)) {
+    const label = rel(r.file);
+    if (r.diagnostics.length > 0) {
+      failed = true;
+      console.log(`\n${label}`);
+      for (const d of r.diagnostics) {
+        const loc = d.location ? `${rel(d.location.file)}:${d.location.line}:${d.location.column}` : label;
+        console.log(`  FAIL [${d.stage.toUpperCase()} ${d.code}] ${loc}`);
+        console.log(`       ${d.message}`);
+      }
+      continue;
+    }
+    if (r.source === undefined) {
+      console.log(`${label}  (no exported functions; nothing to guard)`);
+      continue;
+    }
+    const out = rel(r.outFile);
+    if (checkOnly) {
+      const current = fs.existsSync(r.outFile) ? fs.readFileSync(r.outFile, "utf8") : undefined;
+      if (current === r.source) {
+        console.log(`${out}  up to date`);
+      } else {
+        failed = true;
+        console.log(`${out}  ${current === undefined ? "MISSING" : "OUT OF DATE"} (run \`tslaw guard ${label}\`)`);
+      }
+    } else {
+      fs.writeFileSync(r.outFile, r.source);
+      console.log(`${out}  wrote guards for ${r.functions.join(", ")}`);
+    }
+  }
+  process.exitCode = failed ? 1 : 0;
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const cmd = args[0];
@@ -31,6 +88,10 @@ async function main(): Promise<void> {
   if (!cmd || cmd === "-h" || cmd === "--help") {
     console.log(usage());
     process.exit(0);
+  }
+  if (cmd === "guard") {
+    runGuard(args.slice(1));
+    return;
   }
   if (cmd !== "check") {
     console.error(`Unknown command: ${cmd}\n\n${usage()}`);

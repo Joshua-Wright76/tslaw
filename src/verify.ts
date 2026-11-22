@@ -13,6 +13,21 @@ import { runCvc5, runZ3, type Z3RunResult } from "./z3.js";
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
+/** The compiler options every verified module is checked under. */
+export const VERIFIER_COMPILER_OPTIONS: ts.CompilerOptions = {
+  target: ts.ScriptTarget.ES2022,
+  // Bundler resolution accepts both `./mod.js` and extensionless `./mod` imports, plus
+  // package `exports`, so verified modules resolve the same way in most project setups.
+  module: ts.ModuleKind.ESNext,
+  moduleResolution: ts.ModuleResolutionKind.Bundler,
+  strict: true,
+  noUncheckedIndexedAccess: true,
+  exactOptionalPropertyTypes: true,
+  noImplicitAny: true,
+  noEmit: true,
+  skipLibCheck: true,
+};
+
 /** Transitive `"use verified";` source modules imported by `root` (excluding `root`). */
 function verifiedDeps(root: ts.SourceFile, checker: ts.TypeChecker): ts.SourceFile[] {
   const seen = new Set<ts.SourceFile>([root]);
@@ -43,21 +58,7 @@ export async function verifyFiles(
   const cvc5Path = options.cvc5Path ?? process.env["TSLAW_CVC5"] ?? "cvc5";
   let confirmed = 0;
 
-  const compilerOptions: ts.CompilerOptions = {
-    target: ts.ScriptTarget.ES2022,
-    // Bundler resolution accepts both `./mod.js` and extensionless `./mod` imports, plus
-    // package `exports`, so verified modules resolve the same way in most project setups.
-    module: ts.ModuleKind.ESNext,
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    strict: true,
-    noUncheckedIndexedAccess: true,
-    exactOptionalPropertyTypes: true,
-    noImplicitAny: true,
-    noEmit: true,
-    skipLibCheck: true,
-  };
-
-  const program = ts.createProgram(absPaths, compilerOptions);
+  const program = ts.createProgram(absPaths, VERIFIER_COMPILER_OPTIONS);
   const checker = program.getTypeChecker();
 
   const fileResults: FileVerificationResult[] = [];

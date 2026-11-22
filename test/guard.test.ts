@@ -1,0 +1,94 @@
+/**
+ * `tslaw guard`: generated wrappers that check argument types and `requires` at runtime.
+ *
+ * `test/fixtures/guard/*.guarded.ts` are committed generator output; regenerate them with
+ * `node dist/cli.js guard test/fixtures/guard/bank.ts test/fixtures/guard/limits.ts`.
+ */
+import fs from "node:fs";
+import ts from "typescript";
+import { describe, expect, it } from "vitest";
+import { generateGuards } from "../src/guard.js";
+import { VERIFIER_COMPILER_OPTIONS } from "../src/verify.js";
+import * as guarded from "./fixtures/guard/bank.guarded.js";
+import * as raw from "./fixtures/guard/bank.js";
+
+const DIR = "test/fixtures/guard";
+const account = (balance: bigint, active = true) => ({ balance, owner: { id: 1n, active } });
+// Callers the guards exist for do not respect the types.
+const untyped = guarded as unknown as Record<string, (...args: unknown[]) => unknown>;
+
+describe("tslaw guard", () => {
+  it("generates exactly the committed wrappers", () => {
+    const results = generateGuards([`${DIR}/bank.ts`, `${DIR}/limits.ts`]);
+    for (const r of results) {
+      expect(r.diagnostics).toEqual([]);
+      expect(r.source).toBe(fs.readFileSync(r.outFile, "utf8"));
+    }
+    expect(results[0]!.functions).toEqual(["isOpen", "withdraw", "total", "usesHidden"]);
+  });
+
+  it("generates code that passes the strict type check", () => {
+    const program = ts.createProgram([`${DIR}/bank.guarded.ts`, `${DIR}/limits.guarded.ts`], VERIFIER_COMPILER_OPTIONS);
+    const diags = ts.getPreEmitDiagnostics(program).map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n"));
+    expect(diags).toEqual([]);
+  });
+
+  it("passes valid calls through unchanged", () => {
+    expect(guarded.withdraw(account(100n), 30n, false)).toEqual(raw.withdraw(account(100n), 30n, false));
+    expect(guarded.total(account(1n), account(2n))).toBe(3n);
+    expect(guarded.usesHidden(7n)).toBe(7n);
+  });
+
+  it("rejects arguments of the wrong runtime type", () => {
+    expect(() => untyped["withdraw"]!(account(100n), 30, false)).toThrow(/withdraw: amount must be a bigint, got number 30/);
+    expect(() => untyped["withdraw"]!(account(100n), 30n, "yes")).toThrow(/force must be a boolean/);
+    expect(() => untyped["withdraw"]!(null, 30n, false)).toThrow(/acc must be an object, got null/);
+    expect(() => untyped["withdraw"]!({ balance: 100n }, 30n, false)).toThrow(/acc\.owner must be an object/);
+    expect(() => untyped["withdraw"]!({ balance: 100n, owner: { id: 1, active: true } }, 30n, false)).toThrow(
+      /acc\.owner\.id must be a bigint/,
+    );
+    expect(() => untyped["withdraw"]!(account(100n), 30n)).toThrow(/expected 3 argument\(s\), got 2/);
+    expect(() => untyped["total"]!(account(1n), 2n)).toThrow(TypeError);
+  });
+
+  it("rejects calls that violate `requires`", () => {
+    expect(() => guarded.withdraw(account(100n), 0n, false)).toThrow(RangeError);
+    expect(() => guarded.withdraw(account(100n), 101n, false)).toThrow(/requires\(amount > 0n && amount <= acc\.balance\)/);
+    // Second precondition: a closed account needs `force`.
+    expect(() => guarded.withdraw(account(100n, false), 10n, false)).toThrow(/implies\(!force, isOpen\(acc\)\)/);
+    expect(guarded.withdraw(account(100n, false), 10n, true).balance).toBe(90n);
+    // Third precondition calls a function imported from another verified module.
+    expect(() => guarded.withdraw(account(5000n), 1001n, false)).toThrow(/maxWithdrawal\(\)/);
+    // The unguarded function does not check anything.
+    expect(raw.withdraw(account(100n), 101n, false).balance).toBe(-1n);
+  });
+
+  it("copies records so a caller cannot change them after the check", () => {
+    let reads = 0;
+    const shifty = {
+      get balance(): bigint {
+        // Passes the precondition on first read, would overdraw on a second.
+        return reads++ === 0 ? 100n : 0n;
+      },
+      owner: { id: 1n, active: true },
+      extra: "ignored",
+    };
+    const result = guarded.withdraw(shifty, 60n, false);
+    expect(reads).toBe(1);
+    expect(result.balance).toBe(40n);
+    expect(Object.isFrozen(result.owner)).toBe(true);
+    expect("extra" in result).toBe(false);
+  });
+
+  it("refuses to generate a guard whose `requires` needs a function it cannot import", () => {
+    const [r] = generateGuards([`${DIR}/unexported.ts`]);
+    expect(r!.source).toBeUndefined();
+    expect(r!.diagnostics[0]!.message).toMatch(/`positive`, which is not exported/);
+  });
+
+  it("refuses modules that are not verified", () => {
+    const [r] = generateGuards(["src/runtime.ts"]);
+    expect(r!.source).toBeUndefined();
+    expect(r!.diagnostics[0]!.code).toBe("LAW040");
+  });
+});

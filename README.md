@@ -100,7 +100,20 @@ ensures(withdraw, (acc, amount, result) => result.balance === acc.balance - amou
 
 - `requires(cond)` must come first in the function body. tslaw proves, for **every call from verified code**, that the condition holds at that call, taking into account the `if`, ternary, `&&`, `||` and `implies` conditions around it. A call that can violate it is reported as `DISPROVED "requires of withdraw at line N"` with the arguments that break it.
 - `ensures(fn, (...args, result) => cond)` is proved for all arguments that satisfy the function's `requires`.
-- Both do nothing at runtime, like `law`. They do not stop unverified code from calling the function with bad arguments.
+- Both do nothing at runtime, like `law`. They do not stop unverified code from calling the function with bad arguments; for that, see the next section.
+
+### Guarding the boundary
+
+Proofs cover calls from verified code. Anything else (plain JavaScript, values typed `any`, parsed JSON) can still call a verified function with arguments that break its types or its `requires`. `tslaw guard` generates a checked entry point for those callers:
+
+```sh
+tslaw guard src/bank.ts        # writes src/bank.guarded.ts
+tslaw guard src/bank.ts --check   # for CI: fail if the file on disk is missing or stale
+```
+
+`bank.guarded.ts` exports a wrapper for each exported function of `bank.ts`. Each wrapper checks every argument's runtime type field by field, copies records into frozen objects that hold only the declared fields (so a getter or later mutation cannot change what was checked), evaluates the `requires` conditions, and then calls the verified function. A bad type throws `TypeError`; a violated precondition throws `RangeError`.
+
+Import from `./bank.guarded.js` in unverified code and from `./bank.js` in verified code. A function used inside a `requires` must be exported so the wrapper can call it.
 
 There is also a programmatic API: `import { verifyFiles } from "tslaw"`.
 
@@ -145,7 +158,7 @@ Each file goes through three stages. A failure at any stage stops that file.
 
 - **Only the laws are proved.** tslaw does not check that your laws say what you meant, or that they cover the behavior you care about.
 - **`law` does nothing at runtime.** It is a no-op, so laws cost nothing in production and are never executed there.
-- **Callers outside verified modules are not checked.** A law is proved for all *well-typed* inputs. Unverified code can still call a verified function with values that break its types (through `any`, casts, or plain JavaScript), and nothing stops it at runtime.
+- **Callers outside verified modules are not checked, unless they go through a guard.** A law is proved for all *well-typed* inputs. Unverified code can still call a verified function directly with values that break its types (through `any`, casts, or plain JavaScript). The wrappers from `tslaw guard` close this gap for callers that use them.
 - **Preconditions are yours to enforce.** A law of the form `implies(x >= 0n, ...)` says nothing about negative `x`.
 - **The verifier is trusted.** A proof depends on tslaw's translation to SMT, the TypeScript compiler, and Z3 all being correct. tslaw itself is young.
 
@@ -197,6 +210,7 @@ Codes starting with `TS` come from the TypeScript compiler. The rest are tslaw's
 | `LAW034` | A non-`boolean` (such as a `bigint`) used as a condition or as an operand of `!`, `&&`, `||`. |
 | `LAW035` | `requires(...)` that is not at the start of a function body, or with the wrong arguments. |
 | `LAW036` | Malformed `ensures(...)`: needs a verified function and a callback taking its parameters plus the result. |
+| `LAW040` | `tslaw guard` cannot generate a wrapper: the module is not verified, or a `requires` calls a function that is not exported. |
 | `LAW090` | Internal: translation to SMT failed. Please report it. |
 
 ## Development
