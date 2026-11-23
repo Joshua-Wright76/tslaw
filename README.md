@@ -7,7 +7,7 @@ Verified modules opt in with a `"use verified";` directive and stay ordinary Typ
 ```ts
 "use verified";
 
-import { law, implies } from "tslaw/runtime";
+import { law, implies } from "@joshua_wright76/tslaw/runtime";
 
 export type Account = { readonly balance: bigint; readonly frozen: boolean };
 
@@ -40,7 +40,7 @@ Forget a check, and the law is refuted with inputs you can paste into a test:
 ## Install
 
 ```sh
-npm install --save-dev tslaw
+npm install --save-dev @joshua_wright76/tslaw
 ```
 
 Requirements:
@@ -88,7 +88,7 @@ Each law gets one of these verdicts:
 A function can state what it needs from its callers and what it guarantees in return:
 
 ```ts
-import { requires, ensures } from "tslaw/runtime";
+import { requires, ensures } from "@joshua_wright76/tslaw/runtime";
 
 export function withdraw(acc: Account, amount: bigint): Account {
   requires(amount > 0n && amount <= acc.balance);
@@ -107,7 +107,7 @@ ensures(withdraw, (acc, amount, result) => result.balance === acc.balance - amou
 A function may call itself (or a group of functions each other) if it states a measure that shrinks:
 
 ```ts
-import { decreases, ensures, implies, law } from "tslaw/runtime";
+import { decreases, ensures, implies, law } from "@joshua_wright76/tslaw/runtime";
 
 export function sum(n: bigint): bigint {
   decreases(n);
@@ -134,7 +134,7 @@ Limits: only the `ensures` of the function being called are used, exactly at its
 Function bodies may use `let`, assignment (`=`, `+=`, `-=`, `*=`) and `while`:
 
 ```ts
-import { decreases, ensures, invariant, requires } from "tslaw/runtime";
+import { decreases, ensures, invariant, requires } from "@joshua_wright76/tslaw/runtime";
 
 export function sumTo(n: bigint): bigint {
   requires(n >= 0n);
@@ -170,7 +170,7 @@ Not supported: `for` and `do` loops, `break`, `continue`, `return` inside a loop
 Arrays of supported types (`readonly T[]`, `ReadonlyArray<T>` or `T[]`) are supported through six helpers, because the built-in operations either involve `number` or silently produce `undefined`:
 
 ```ts
-import { append, at, concat, len, slice, withAt } from "tslaw/runtime";
+import { append, at, concat, len, slice, withAt } from "@joshua_wright76/tslaw/runtime";
 
 len(xs)              // number of elements, as a bigint
 at(xs, i)            // element i            requires 0n <= i && i < len(xs)
@@ -224,7 +224,7 @@ tslaw guard src/bank.ts --check   # for CI: fail if the file on disk is missing 
 
 Import from `./bank.guarded.js` in unverified code and from `./bank.js` in verified code. A function used inside a `requires` must be exported so the wrapper can call it.
 
-There is also a programmatic API: `import { verifyFiles } from "tslaw"`.
+There is also a programmatic API: `import { verifyFiles } from "@joshua_wright76/tslaw"`.
 
 ## How it works
 
@@ -254,7 +254,7 @@ Each file goes through three stages. A failure at any stage stops that file.
 - `while` loops with `invariant(...)` and `decreases(...)`.
 - Operators: `+ - *`, comparisons, `===`/`!==` on `bigint` and `boolean`, `&& || !`.
 - Calls to other verified functions, `implies(p, q)`, and the array helpers.
-- Imports: `law`, `implies`, `requires`, `ensures`, `decreases`, `invariant` and the array helpers from `tslaw/runtime`, types from anywhere, and functions from other `"use verified";` modules.
+- Imports: `law`, `implies`, `requires`, `ensures`, `decreases`, `invariant` and the array helpers from `@joshua_wright76/tslaw/runtime`, types from anywhere, and functions from other `"use verified";` modules.
 
 **Not allowed**
 
@@ -346,7 +346,7 @@ node dist/cli.js check examples/unsound.law.ts                       # dialect e
 node dist/cli.js check examples/tokens.law.ts --emit-smt             # see the SMT-LIB2
 ```
 
-Files in `examples/` import the runtime by relative path (`../src/runtime.js`) so they work inside this repository; in your own project, import `tslaw/runtime`.
+Files in `examples/` import the runtime by relative path (`../src/runtime.js`) so they work inside this repository; in your own project, import `@joshua_wright76/tslaw/runtime`.
 
 Tests that need cvc5 or Lean are skipped when those are not installed.
 

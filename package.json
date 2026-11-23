@@ -1,9 +1,20 @@
 {
-  "name": "tslaw",
+  "name": "@joshua_wright76/tslaw",
   "version": "0.1.0",
   "description": "Verified TypeScript: write laws about pure TypeScript functions and have Z3 prove them at compile time",
-  "keywords": ["typescript", "formal-verification", "z3", "smt", "verification", "proof", "static-analysis"],
+  "keywords": [
+    "typescript",
+    "formal-verification",
+    "z3",
+    "smt",
+    "verification",
+    "proof",
+    "static-analysis"
+  ],
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "author": "Joshua Wright",
   "repository": {
     "type": "git",
