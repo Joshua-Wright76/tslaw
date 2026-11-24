@@ -27,7 +27,7 @@
     "node": ">=20"
   },
   "bin": {
-    "tslaw": "./dist/cli.js"
+    "tslaw": "dist/cli.js"
   },
   "exports": {
     ".": {
