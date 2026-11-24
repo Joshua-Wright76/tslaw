@@ -169,4 +169,75 @@ export function $fail(args: bigint, $verified: bigint, w: Weird): bigint {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("supports explicit and auto-detected import extensions (.ts, .js, none)", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tslaw-guard-ext-"));
+    try {
+      const runtimePath = path.resolve("src/runtime.ts");
+      const helper = path.join(dir, "helper.ts");
+      const main = path.join(dir, "main.ts");
+      fs.writeFileSync(
+        helper,
+        `"use verified";
+export function limit(): bigint { return 10n; }
+`,
+      );
+      fs.writeFileSync(
+        main,
+        `"use verified";
+import { requires } from ${JSON.stringify(runtimePath)};
+import { limit } from "./helper.ts";
+export function take(n: bigint): bigint {
+  requires(n >= 0n && n <= limit());
+  return n;
+}
+`,
+      );
+
+      // Auto-detected from `./helper.ts` import in source file:
+      const [autoFromSource] = generateGuards([main]);
+      expect(autoFromSource!.diagnostics).toEqual([]);
+      expect(autoFromSource!.source).toContain('import * as $verified from "./main.ts";');
+      expect(autoFromSource!.source).toContain('import { limit as $dep0 } from "./helper.ts";');
+
+      // Explicit overrides:
+      const [explicitJs] = generateGuards([main], { importExt: "js" });
+      expect(explicitJs!.source).toContain('import * as $verified from "./main.js";');
+      expect(explicitJs!.source).toContain('import { limit as $dep0 } from "./helper.js";');
+
+      const [explicitNone] = generateGuards([main], { importExt: "none" });
+      expect(explicitNone!.source).toContain('import * as $verified from "./main";');
+      expect(explicitNone!.source).toContain('import { limit as $dep0 } from "./helper";');
+
+      // Auto-detected from nearest tsconfig.json when the source file has no relative imports:
+      const tsProjectDir = path.join(dir, "ts-project");
+      fs.mkdirSync(tsProjectDir);
+      fs.writeFileSync(
+        path.join(tsProjectDir, "tsconfig.json"),
+        JSON.stringify({ compilerOptions: { noEmit: true, allowImportingTsExtensions: true } }),
+      );
+      const standalone = path.join(tsProjectDir, "standalone.ts");
+      fs.writeFileSync(
+        standalone,
+        `"use verified";
+import { requires } from ${JSON.stringify(runtimePath)};
+export function inc(n: bigint): bigint {
+  requires(n >= 0n);
+  return n + 1n;
+}
+`,
+      );
+      const [autoFromTsconfig] = generateGuards([standalone]);
+      expect(autoFromTsconfig!.diagnostics).toEqual([]);
+      expect(autoFromTsconfig!.source).toContain('import * as $verified from "./standalone.ts";');
+
+      // Generated `.ts`-importing guard passes strict type checking:
+      fs.writeFileSync(autoFromTsconfig!.outFile, autoFromTsconfig!.source!);
+      const program = ts.createProgram([autoFromTsconfig!.outFile], VERIFIER_COMPILER_OPTIONS);
+      const diags = ts.getPreEmitDiagnostics(program).map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n"));
+      expect(diags).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

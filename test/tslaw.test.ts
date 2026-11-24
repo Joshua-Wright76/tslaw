@@ -394,4 +394,45 @@ export function bad(n: bigint): bigint {
     expect(byName.get("termination of the loop at line 5")).toBe("disproved");
     expect(byName.get("invariant of the loop at line 5: kept by the body")).toBe("disproved");
   });
+
+  it("allows explicit .ts relative imports between verified modules and caches repeated proved obligations", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "tslaw-ts-ext-"));
+    tmpDirs.push(dir);
+    const runtimePath = path.resolve("src/runtime.ts");
+    const depFile = path.join(dir, "math.ts");
+    const lawFile = path.join(dir, "math.law.ts");
+    fs.writeFileSync(
+      depFile,
+      `"use verified";
+import { requires } from ${JSON.stringify(runtimePath)};
+export function nonNeg(x: bigint): bigint {
+  requires(x >= 0n);
+  return x + 1n;
+}
+export function safeUse(x: bigint): bigint {
+  return x >= 0n ? nonNeg(x) : 0n;
+}
+`,
+    );
+    fs.writeFileSync(
+      lawFile,
+      `"use verified";
+import { implies, law } from ${JSON.stringify(runtimePath)};
+import { nonNeg, safeUse } from "./math.ts";
+law("safeUse is never negative", (x: bigint) => safeUse(x) >= 0n);
+law("nonNeg increases", (x: bigint) => implies(x >= 0n, nonNeg(x) > x));
+`,
+    );
+
+    const report = await verifyFiles([depFile, lawFile]);
+    expect(report.ok).toBe(true);
+    expect(report.summary.errors).toBe(0);
+    expect(report.summary.proved).toBeGreaterThanOrEqual(4);
+    // The obligation from `math.ts` reused when checking `math.law.ts` comes from the cache (0ms).
+    const depReqInLaw = report.files[1]!.laws.find(
+      (l) => l.kind === "requires" && l.location.file === depFile,
+    );
+    expect(depReqInLaw?.status).toBe("proved");
+    expect(depReqInLaw?.durationMs).toBe(0);
+  });
 });

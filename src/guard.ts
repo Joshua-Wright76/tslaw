@@ -23,6 +23,20 @@ import {
 import type { Diagnostic, VType } from "./types.js";
 import { VERIFIER_COMPILER_OPTIONS, verifiedDeps } from "./verify.js";
 
+export type GuardImportExt = "js" | "ts" | "none";
+
+export interface GuardOptions {
+  /**
+   * Extension style for relative imports in generated `.guarded.ts` files:
+   * - `"js"`: emit `.js` (`.mjs`/`.cjs` for `.mts`/`.cts`) for transpiled ESM projects.
+   * - `"ts"`: emit `.ts` (preserving the source extension) for Node native TS / Deno / Bun / bundlers.
+   * - `"none"`: omit the extension for bundler-style imports.
+   * When omitted, detected from the source file's relative imports or the nearest `tsconfig.json`
+   * (`allowImportingTsExtensions`), falling back to `"js"`.
+   */
+  readonly importExt?: GuardImportExt;
+}
+
 export interface GuardResult {
   readonly file: string;
   /** Where the guard module belongs (`<name>.guarded.ts` next to the source). */
@@ -99,7 +113,49 @@ function isExported(decl: ts.FunctionDeclaration): boolean {
   );
 }
 
-export function generateGuards(filePaths: ReadonlyArray<string>): GuardResult[] {
+/** Check whether the nearest `tsconfig.json` enables `allowImportingTsExtensions`. */
+function tsconfigAllowsTsExtensions(dir: string): boolean {
+  const configPath = ts.findConfigFile(dir, ts.sys.fileExists);
+  if (!configPath) return false;
+  const read = ts.readConfigFile(configPath, ts.sys.readFile);
+  if (read.error || !read.config) return false;
+  const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, path.dirname(configPath));
+  return parsed.options.allowImportingTsExtensions === true;
+}
+
+/** Detect the preferred relative import extension style for a verified source file. */
+function detectImportExt(sf: ts.SourceFile, dir: string): GuardImportExt {
+  let sawTs = false;
+  let sawJs = false;
+  for (const stmt of sf.statements) {
+    if (!ts.isImportDeclaration(stmt) || !ts.isStringLiteral(stmt.moduleSpecifier)) continue;
+    const spec = stmt.moduleSpecifier.text;
+    if (!spec.startsWith("./") && !spec.startsWith("../")) continue;
+    if (/\.[mc]?tsx?$/i.test(spec)) sawTs = true;
+    else if (/\.[mc]?jsx?$/i.test(spec)) sawJs = true;
+  }
+  if (sawTs && !sawJs) return "ts";
+  if (sawJs) return "js";
+  return tsconfigAllowsTsExtensions(dir) ? "ts" : "js";
+}
+
+function formatImportPath(fromDir: string, target: string, extMode: GuardImportExt): string {
+  const relRaw = path.relative(fromDir, target).split(path.sep).join("/");
+  let rel: string;
+  if (extMode === "ts") {
+    rel = relRaw;
+  } else if (extMode === "none") {
+    rel = relRaw.replace(/\.(?:[mc]?ts|tsx)$/i, "");
+  } else {
+    rel = relRaw.replace(/\.mts$/i, ".mjs").replace(/\.cts$/i, ".cjs").replace(/\.tsx?$/i, ".js");
+  }
+  return rel.startsWith(".") ? rel : `./${rel}`;
+}
+
+export function generateGuards(
+  filePaths: ReadonlyArray<string>,
+  options: GuardOptions = {},
+): GuardResult[] {
   const absPaths = filePaths.map((p) => path.resolve(p));
   const program = ts.createProgram(absPaths, VERIFIER_COMPILER_OPTIONS);
   let checker: ts.TypeChecker;
@@ -125,7 +181,7 @@ export function generateGuards(filePaths: ReadonlyArray<string>): GuardResult[] 
         },
       ];
     }
-    return absPaths.flatMap((p) => generateGuards([p]));
+    return absPaths.flatMap((p) => generateGuards([p], options));
   }
 
   return absPaths.map((file): GuardResult => {
@@ -324,10 +380,8 @@ export function generateGuards(filePaths: ReadonlyArray<string>): GuardResult[] 
 
     if (problems.length > 0) return { file, outFile, diagnostics: problems, functions: [] };
 
-    const relImport = (target: string): string => {
-      const rel = path.relative(parsed.dir, target).split(path.sep).join("/").replace(/\.tsx?$/, ".js");
-      return rel.startsWith(".") ? rel : `./${rel}`;
-    };
+    const extMode = options.importExt ?? detectImportExt(sf, parsed.dir);
+    const relImport = (target: string): string => formatImportPath(parsed.dir, target, extMode);
     const depImportLines = [...depImports].map(
       ([decl, alias]) =>
         `import { ${decl.name!.text} as ${alias} } from ${key(relImport(decl.getSourceFile().fileName))};`,
@@ -340,7 +394,7 @@ export function generateGuards(filePaths: ReadonlyArray<string>): GuardResult[] 
       `// arguments' runtime types, copies records into frozen objects with only the declared`,
       `// fields, checks the function's \`requires\`, and then calls the verified function.`,
       ``,
-      `import * as ${P}verified from ${key(`./${parsed.name}.js`)};`,
+      `import * as ${P}verified from ${key(relImport(file))};`,
       ...depImportLines,
       ``,
       `function ${P}show(v: unknown): string {`,

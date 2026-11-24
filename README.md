@@ -46,6 +46,7 @@ npm install --save-dev @joshua_wright76/tslaw
 Requirements:
 
 - Node.js 20 or newer.
+- TypeScript `"target": "ES2020"` or newer in your project's `tsconfig.json` (required for `bigint` literals; note that Next.js scaffolds `"target": "ES2017"` by default).
 - The `z3` binary on your `PATH` (`brew install z3` or a [release build](https://github.com/Z3Prover/z3/releases)). To use a binary elsewhere, pass `--z3 /path/to/z3` or set `TSLAW_Z3`. Distribution packages can be years old: Ubuntu's `apt` Z3 times out on array and recursion proofs that a current release settles in milliseconds. CI uses Z3 5.4.1 and cvc5 1.4.2.
 
 ## Usage
@@ -216,13 +217,14 @@ Limits: no `xs.length`, `xs[i]`, methods, spread, or `===` on arrays; no tuples;
 Proofs cover calls from verified code. Anything else (plain JavaScript, values typed `any`, parsed JSON) can still call a verified function with arguments that break its types or its `requires`. `tslaw guard` generates a checked entry point for those callers:
 
 ```sh
-tslaw guard src/bank.ts        # writes src/bank.guarded.ts
-tslaw guard src/bank.ts --check   # for CI: fail if the file on disk is missing or stale
+tslaw guard src/bank.ts                       # writes src/bank.guarded.ts
+tslaw guard src/bank.ts --check               # for CI: fail if the file on disk is missing or stale
+tslaw guard src/bank.ts --import-ext ts       # emit .ts imports (also auto-detected from tsconfig/source)
 ```
 
 `bank.guarded.ts` exports a wrapper for each exported function of `bank.ts`. Each wrapper checks every argument's runtime type field by field and element by element, copies records and arrays into frozen objects that hold only the declared fields (so a getter or later mutation cannot change what was checked), evaluates the `requires` conditions, and then calls the verified function. A bad type throws `TypeError`; a violated precondition throws `RangeError`.
 
-Import from `./bank.guarded.js` in unverified code and from `./bank.js` in verified code. A function used inside a `requires` must be exported so the wrapper can call it.
+Relative imports in `bank.guarded.ts` default to `.ts` when the source file uses `.ts` imports or the nearest `tsconfig.json` enables `allowImportingTsExtensions`, and `.js` otherwise; pass `--import-ext js|ts|none` to override. Import from `./bank.guarded.js` (or `.ts`) in unverified code and from `./bank.js` (or `.ts`) in verified code. A function used inside a `requires` must be exported so the wrapper can call it.
 
 There is also a programmatic API: `import { verifyFiles } from "@joshua_wright76/tslaw"`.
 
@@ -269,7 +271,7 @@ Each file goes through three stages. A failure at any stage stops that file.
 `PROVED` is a statement about a mathematical model of your code. It is worth exactly as much as the following assumptions:
 
 - **Only the laws are proved.** tslaw does not check that your laws say what you meant, or that they cover the behavior you care about.
-- **`law` does nothing at runtime.** It is a no-op, so laws cost nothing in production and are never executed there.
+- **`law` does nothing at runtime.** It is a no-op, so laws cost nothing in production and are never executed there. If your project enforces strict test-coverage gates (e.g. 100% lines/functions), put your verified functions in `foo.ts` and your `law(...)` / `ensures(...)` proofs in a separate `foo.law.ts` excluded from runtime coverage.
 - **Callers outside verified modules are not checked, unless they go through a guard.** A law is proved for all *well-typed* inputs. Unverified code can still call a verified function directly with values that break its types (through `any`, casts, or plain JavaScript). The wrappers from `tslaw guard` close this gap for callers that use them.
 - **Preconditions are yours to enforce.** A law of the form `implies(x >= 0n, ...)` says nothing about negative `x`.
 - **The verifier is trusted.** A proof depends on tslaw's translation to SMT, the TypeScript compiler, and Z3 all being correct. tslaw itself is young.

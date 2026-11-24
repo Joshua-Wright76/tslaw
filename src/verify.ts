@@ -16,10 +16,12 @@ const DEFAULT_TIMEOUT_MS = 5000;
 /** The compiler options every verified module is checked under. */
 export const VERIFIER_COMPILER_OPTIONS: ts.CompilerOptions = {
   target: ts.ScriptTarget.ES2022,
-  // Bundler resolution accepts both `./mod.js` and extensionless `./mod` imports, plus
-  // package `exports`, so verified modules resolve the same way in most project setups.
+  // Bundler resolution accepts `./mod.js`, `./mod.ts`, and extensionless `./mod` imports, plus
+  // package `exports`, so verified modules resolve the same way across transpiled, bundler,
+  // and Node native-TypeScript setups.
   module: ts.ModuleKind.ESNext,
   moduleResolution: ts.ModuleResolutionKind.Bundler,
+  allowImportingTsExtensions: true,
   strict: true,
   noUncheckedIndexedAccess: true,
   exactOptionalPropertyTypes: true,
@@ -115,6 +117,9 @@ export async function verifyFiles(
   }
 
   const fileResults: FileVerificationResult[] = [];
+  // Cache deterministic PROVED verdicts across files in the same run (e.g. when both `mod.ts`
+  // and `mod.law.ts` are passed together, imported obligations produce identical SMT queries).
+  const provedCache = new Map<string, { readonly crossCheck?: LawResult["crossCheck"] }>();
   let verifiedFiles = 0;
   let proved = 0;
   let disproved = 0;
@@ -262,6 +267,20 @@ export async function verifyFiles(
 
     /** Run one query through Z3 (and cvc5 when cross-checking) and combine the verdicts. */
     const solve = async (lowered: LoweredLaw): Promise<LawResult> => {
+      const cached = provedCache.get(lowered.smtScript);
+      if (cached) {
+        return {
+          file: absPath,
+          kind: lowered.kind,
+          name: lowered.law.name,
+          location: lowered.law.location,
+          params: lowered.law.params.map((p) => ({ name: p.name, type: p.type })),
+          status: "proved",
+          durationMs: 0,
+          ...(options.emitSmt ? { smt: lowered.smtScript } : {}),
+          ...(cached.crossCheck ? { crossCheck: cached.crossCheck } : {}),
+        };
+      }
       const z3Only = await runZ3(lowered, { timeoutMs, z3Path });
       let z3Res: Z3RunResult = z3Only;
       let crossCheck: LawResult["crossCheck"];
@@ -286,6 +305,9 @@ export async function verifyFiles(
           z3Res = other;
           crossCheck = "cvc5-only";
         }
+      }
+      if (z3Res.status === "proved") {
+        provedCache.set(lowered.smtScript, crossCheck ? { crossCheck } : {});
       }
       return {
         file: absPath,

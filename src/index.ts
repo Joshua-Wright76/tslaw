@@ -14,7 +14,12 @@ export {
   type LawFn,
 } from "./runtime.js";
 export { verifyFiles } from "./verify.js";
-export { generateGuards, type GuardResult } from "./guard.js";
+export {
+  generateGuards,
+  type GuardImportExt,
+  type GuardOptions,
+  type GuardResult,
+} from "./guard.js";
 export { analyzeDialect, hasUseVerifiedDirective, resolveVType } from "./dialect.js";
 export { lowerModuleLaws } from "./smt.js";
 export type {

@@ -1,6 +1,6 @@
 {
   "name": "@joshua_wright76/tslaw",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Verified TypeScript: write laws about pure TypeScript functions and have Z3 prove them at compile time",
   "keywords": [
     "typescript",

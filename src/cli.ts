@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path";
 import fs from "node:fs";
-import { generateGuards } from "./guard.js";
+import { generateGuards, type GuardImportExt } from "./guard.js";
 import { verifyFiles } from "./verify.js";
 
 function usage(): string {
@@ -11,13 +11,12 @@ function usage(): string {
     "Usage:",
     "  tslaw check <file1.ts> [file2.ts ...] [options]",
     "",
-    "  tslaw guard <file1.ts> [file2.ts ...] [--check]",
+    "  tslaw guard <file1.ts> [file2.ts ...] [options]",
     "",
     "Commands:",
     "  check              Prove the laws and contracts in verified modules",
     "  guard              Write <name>.guarded.ts next to each verified module: wrappers that",
     "                     check argument types and `requires` at runtime, for unverified callers.",
-    "                     With --check, only report whether the files on disk are up to date.",
     "",
     "Options for check:",
     "  --emit-smt         Print generated SMT-LIB2 for each law",
@@ -27,6 +26,11 @@ function usage(): string {
     "  --cross-check      Also run every law through cvc5 and require it to agree with Z3",
     "  --cvc5 <path>      Path to cvc5 binary (default: TSLAW_CVC5 or 'cvc5')",
     "  --all              Verify files even without a '\"use verified\";' directive",
+    "",
+    "Options for guard:",
+    "  --check            Report whether the guarded files on disk are up to date without writing",
+    "  --import-ext <ext> Relative import extension in generated files: js, ts, or none",
+    "                     (default: auto-detected from source imports or tsconfig.json)",
   ].join("\n");
 }
 
@@ -35,20 +39,35 @@ function rel(file: string): string {
 }
 
 function runGuard(args: string[]): void {
-  const checkOnly = args.includes("--check");
-  const unknown = args.find((a) => a.startsWith("-") && a !== "--check");
-  if (unknown) {
-    console.error(`Unknown flag: ${unknown}`);
-    process.exit(2);
+  let checkOnly = false;
+  let importExt: GuardImportExt | undefined;
+  const files: string[] = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--check") {
+      checkOnly = true;
+    } else if (a === "--import-ext") {
+      const next = args[++i];
+      if (next !== "js" && next !== "ts" && next !== "none") {
+        console.error("--import-ext must be one of: js, ts, none");
+        process.exit(2);
+      }
+      importExt = next;
+    } else if (a.startsWith("-")) {
+      console.error(`Unknown flag: ${a}`);
+      process.exit(2);
+    } else {
+      files.push(a);
+    }
   }
-  const files = args.filter((a) => !a.startsWith("-"));
   if (files.length === 0) {
     console.error("No files specified.\n\n" + usage());
     process.exit(2);
   }
 
   let failed = false;
-  for (const r of generateGuards(files)) {
+  for (const r of generateGuards(files, importExt ? { importExt } : {})) {
     const label = rel(r.file);
     if (r.diagnostics.length > 0) {
       failed = true;
@@ -203,9 +222,10 @@ async function main(): Promise<void> {
             : l.crossCheck === "cvc5-only"
               ? ", by cvc5 only: Z3 could not decide"
               : "";
+      const from = l.location.file !== f.file ? ` in ${rel(l.location.file)}` : "";
       const time = `${l.durationMs}ms${note}`;
       if (l.status === "proved") {
-        console.log(`  PROVED    "${l.name}" (${time})`);
+        console.log(`  PROVED    "${l.name}"${from} (${time})`);
       } else if (l.status === "disproved") {
         console.log(`  DISPROVED "${l.name}" (${time}) at ${rel(l.location.file)}:${l.location.line}`);
         if (l.counterexample && l.counterexample.length > 0) {
@@ -213,7 +233,7 @@ async function main(): Promise<void> {
           console.log(`            Counterexample: ${vals}`);
         }
       } else {
-        console.log(`  ${l.status.toUpperCase().padEnd(9)} "${l.name}" (${time})`);
+        console.log(`  ${l.status.toUpperCase().padEnd(9)} "${l.name}"${from} (${time})`);
         if (l.reason) console.log(`            ${l.reason}`);
       }
       if (emitSmt && l.smt) {
