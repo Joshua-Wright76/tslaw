@@ -59,3 +59,7 @@ Preserve every invariant below when editing the checker, translator, or guard ge
   node dist/cli.js guard test/fixtures/guard/bank.ts test/fixtures/guard/limits.ts test/fixtures/guard/basket.ts
   ```
 - Add a soundness fixture in `test/fixtures/soundness/` or regression test in `test/tslaw.test.ts` for every bug fix, and keep `test/fuzz/generate.ts` in sync whenever the verified subset grows.
+
+## Releasing
+
+CI publishes to npm (`@joshua_wright76/tslaw`) from `main`: when a pushed commit's `package.json` version is not on npm yet and all test/proof jobs pass, the `publish` job in `.github/workflows/ci.yml` runs `npm publish` via npm trusted publishing (OIDC, no token) and pushes a `vX.Y.Z` tag. To release, bump `version` (e.g. `npm version patch --no-git-tag-version`) in the change being merged; merges that keep the version publish nothing.
