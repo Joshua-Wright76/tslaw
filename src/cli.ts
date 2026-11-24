@@ -90,7 +90,8 @@ function runGuard(args: string[]): void {
         console.log(`${out}  up to date`);
       } else {
         failed = true;
-        console.log(`${out}  ${current === undefined ? "MISSING" : "OUT OF DATE"} (run \`tslaw guard ${label}\`)`);
+        const extFlag = importExt ? ` --import-ext ${importExt}` : "";
+        console.log(`${out}  ${current === undefined ? "MISSING" : "OUT OF DATE"} (run \`tslaw guard ${label}${extFlag}\`)`);
       }
     } else {
       fs.writeFileSync(r.outFile, r.source);

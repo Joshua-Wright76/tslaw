@@ -4,11 +4,12 @@
  * `test/fixtures/guard/*.guarded.ts` are committed generator output; regenerate them with
  * `node dist/cli.js guard test/fixtures/guard/bank.ts test/fixtures/guard/limits.ts test/fixtures/guard/basket.ts`.
  */
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import ts from "typescript";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { generateGuards } from "../src/guard.js";
 import { VERIFIER_COMPILER_OPTIONS } from "../src/verify.js";
 import * as guarded from "./fixtures/guard/bank.guarded.js";
@@ -209,12 +210,48 @@ export function take(n: bigint): bigint {
       expect(explicitNone!.source).toContain('import * as $verified from "./main";');
       expect(explicitNone!.source).toContain('import { limit as $dep0 } from "./helper";');
 
-      // Auto-detected from nearest tsconfig.json when the source file has no relative imports:
+      // Auto-detected from extensionless relative imports (bundler style):
+      const bundlerDir = path.join(dir, "bundler-project");
+      fs.mkdirSync(bundlerDir);
+      const bundlerHelper = path.join(bundlerDir, "helper.ts");
+      const bundlerMain = path.join(bundlerDir, "main.ts");
+      fs.writeFileSync(
+        bundlerHelper,
+        `"use verified";
+export function limit(): bigint { return 10n; }
+`,
+      );
+      fs.writeFileSync(
+        bundlerMain,
+        `"use verified";
+import { requires } from ${JSON.stringify(runtimePath)};
+import { limit } from "./helper";
+export function take(n: bigint): bigint {
+  requires(n >= 0n && n <= limit());
+  return n;
+}
+`,
+      );
+      const [autoNone] = generateGuards([bundlerMain]);
+      expect(autoNone!.diagnostics).toEqual([]);
+      expect(autoNone!.source).toContain('import * as $verified from "./main";');
+      expect(autoNone!.source).toContain('import { limit as $dep0 } from "./helper";');
+      fs.writeFileSync(autoNone!.outFile, autoNone!.source!);
+      const bundlerProgram = ts.createProgram([autoNone!.outFile], VERIFIER_COMPILER_OPTIONS);
+      expect(
+        ts.getPreEmitDiagnostics(bundlerProgram).map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n")),
+      ).toEqual([]);
+
+      // Auto-detected from nearest tsconfig.json (including `extends`) without crawling disk:
       const tsProjectDir = path.join(dir, "ts-project");
       fs.mkdirSync(tsProjectDir);
       fs.writeFileSync(
-        path.join(tsProjectDir, "tsconfig.json"),
+        path.join(tsProjectDir, "tsconfig.base.json"),
         JSON.stringify({ compilerOptions: { noEmit: true, allowImportingTsExtensions: true } }),
+      );
+      fs.writeFileSync(
+        path.join(tsProjectDir, "tsconfig.json"),
+        JSON.stringify({ extends: "./tsconfig.base.json" }),
       );
       const standalone = path.join(tsProjectDir, "standalone.ts");
       fs.writeFileSync(
@@ -227,7 +264,14 @@ export function inc(n: bigint): bigint {
 }
 `,
       );
-      const [autoFromTsconfig] = generateGuards([standalone]);
+      const readDirSpy = vi.spyOn(ts.sys, "readDirectory");
+      let autoFromTsconfig: ReturnType<typeof generateGuards>[number];
+      try {
+        [autoFromTsconfig] = generateGuards([standalone]);
+        expect(readDirSpy).not.toHaveBeenCalled();
+      } finally {
+        readDirSpy.mockRestore();
+      }
       expect(autoFromTsconfig!.diagnostics).toEqual([]);
       expect(autoFromTsconfig!.source).toContain('import * as $verified from "./standalone.ts";');
 
@@ -236,6 +280,15 @@ export function inc(n: bigint): bigint {
       const program = ts.createProgram([autoFromTsconfig!.outFile], VERIFIER_COMPILER_OPTIONS);
       const diags = ts.getPreEmitDiagnostics(program).map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n"));
       expect(diags).toEqual([]);
+
+      // CLI `--check` preserves `--import-ext` in its regeneration hint:
+      const cli = spawnSync(
+        process.execPath,
+        [path.resolve("dist/cli.js"), "guard", main, "--check", "--import-ext", "none"],
+        { encoding: "utf8" },
+      );
+      expect(cli.status).toBe(1);
+      expect(cli.stdout).toContain("--import-ext none");
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

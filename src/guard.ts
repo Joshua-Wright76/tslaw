@@ -31,8 +31,8 @@ export interface GuardOptions {
    * - `"js"`: emit `.js` (`.mjs`/`.cjs` for `.mts`/`.cts`) for transpiled ESM projects.
    * - `"ts"`: emit `.ts` (preserving the source extension) for Node native TS / Deno / Bun / bundlers.
    * - `"none"`: omit the extension for bundler-style imports.
-   * When omitted, detected from the source file's relative imports or the nearest `tsconfig.json`
-   * (`allowImportingTsExtensions`), falling back to `"js"`.
+   * When omitted, detected from the source file's relative imports (`.ts`, `.js`, or extensionless)
+   * or the nearest `tsconfig.json` (`allowImportingTsExtensions`), falling back to `"js"`.
    */
   readonly importExt?: GuardImportExt;
 }
@@ -113,30 +113,48 @@ function isExported(decl: ts.FunctionDeclaration): boolean {
   );
 }
 
+// Parse only compiler options (including `extends`) without scanning the directory tree for files.
+const CONFIG_PARSE_HOST: ts.ParseConfigHost = {
+  useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
+  fileExists: (p) => ts.sys.fileExists(p),
+  readFile: (p) => ts.sys.readFile(p),
+  readDirectory: () => [],
+};
+
 /** Check whether the nearest `tsconfig.json` enables `allowImportingTsExtensions`. */
-function tsconfigAllowsTsExtensions(dir: string): boolean {
+function tsconfigAllowsTsExtensions(dir: string, cache: Map<string, boolean>): boolean {
+  const cached = cache.get(dir);
+  if (cached !== undefined) return cached;
+  let allows = false;
   const configPath = ts.findConfigFile(dir, ts.sys.fileExists);
-  if (!configPath) return false;
-  const read = ts.readConfigFile(configPath, ts.sys.readFile);
-  if (read.error || !read.config) return false;
-  const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, path.dirname(configPath));
-  return parsed.options.allowImportingTsExtensions === true;
+  if (configPath) {
+    const read = ts.readConfigFile(configPath, ts.sys.readFile);
+    if (!read.error && read.config) {
+      const parsed = ts.parseJsonConfigFileContent(read.config, CONFIG_PARSE_HOST, path.dirname(configPath));
+      allows = parsed.options.allowImportingTsExtensions === true;
+    }
+  }
+  cache.set(dir, allows);
+  return allows;
 }
 
 /** Detect the preferred relative import extension style for a verified source file. */
-function detectImportExt(sf: ts.SourceFile, dir: string): GuardImportExt {
+function detectImportExt(sf: ts.SourceFile, dir: string, tsconfigCache: Map<string, boolean>): GuardImportExt {
   let sawTs = false;
   let sawJs = false;
+  let sawNone = false;
   for (const stmt of sf.statements) {
     if (!ts.isImportDeclaration(stmt) || !ts.isStringLiteral(stmt.moduleSpecifier)) continue;
     const spec = stmt.moduleSpecifier.text;
     if (!spec.startsWith("./") && !spec.startsWith("../")) continue;
     if (/\.[mc]?tsx?$/i.test(spec)) sawTs = true;
     else if (/\.[mc]?jsx?$/i.test(spec)) sawJs = true;
+    else sawNone = true;
   }
-  if (sawTs && !sawJs) return "ts";
+  if (sawTs && !sawJs && !sawNone) return "ts";
+  if (sawNone && !sawTs && !sawJs) return "none";
   if (sawJs) return "js";
-  return tsconfigAllowsTsExtensions(dir) ? "ts" : "js";
+  return tsconfigAllowsTsExtensions(dir, tsconfigCache) ? "ts" : "js";
 }
 
 function formatImportPath(fromDir: string, target: string, extMode: GuardImportExt): string {
@@ -184,6 +202,7 @@ export function generateGuards(
     return absPaths.flatMap((p) => generateGuards([p], options));
   }
 
+  const tsconfigCache = new Map<string, boolean>();
   return absPaths.map((file): GuardResult => {
     const parsed = path.parse(file);
     const outFile = path.join(parsed.dir, `${parsed.name}.guarded.ts`);
@@ -380,7 +399,7 @@ export function generateGuards(
 
     if (problems.length > 0) return { file, outFile, diagnostics: problems, functions: [] };
 
-    const extMode = options.importExt ?? detectImportExt(sf, parsed.dir);
+    const extMode = options.importExt ?? detectImportExt(sf, parsed.dir, tsconfigCache);
     const relImport = (target: string): string => formatImportPath(parsed.dir, target, extMode);
     const depImportLines = [...depImports].map(
       ([decl, alias]) =>

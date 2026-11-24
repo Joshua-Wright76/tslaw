@@ -224,7 +224,7 @@ tslaw guard src/bank.ts --import-ext ts       # emit .ts imports (also auto-dete
 
 `bank.guarded.ts` exports a wrapper for each exported function of `bank.ts`. Each wrapper checks every argument's runtime type field by field and element by element, copies records and arrays into frozen objects that hold only the declared fields (so a getter or later mutation cannot change what was checked), evaluates the `requires` conditions, and then calls the verified function. A bad type throws `TypeError`; a violated precondition throws `RangeError`.
 
-Relative imports in `bank.guarded.ts` default to `.ts` when the source file uses `.ts` imports or the nearest `tsconfig.json` enables `allowImportingTsExtensions`, and `.js` otherwise; pass `--import-ext js|ts|none` to override. Import from `./bank.guarded.js` (or `.ts`) in unverified code and from `./bank.js` (or `.ts`) in verified code. A function used inside a `requires` must be exported so the wrapper can call it.
+Relative imports in `bank.guarded.ts` match the source file's relative imports (`.ts`, `.js`, or extensionless), falling back to `.ts` when the nearest `tsconfig.json` enables `allowImportingTsExtensions` and `.js` otherwise; pass `--import-ext js|ts|none` to override. Import from `./bank.guarded.js` (or `.ts`) in unverified code and from `./bank.js` (or `.ts`) in verified code. A function used inside a `requires` must be exported so the wrapper can call it.
 
 There is also a programmatic API: `import { verifyFiles } from "@joshua_wright76/tslaw"`.
 
